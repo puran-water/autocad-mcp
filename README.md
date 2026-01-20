@@ -2,6 +2,9 @@
 
 This MCP server enables natural language control of AutoCAD LT 2024/2025 through AutoLISP code generation and execution. It bridges Claude or other LLM clients with AutoCAD LT for creating engineering drawings, P&ID diagrams, and technical documentation through conversational prompts.
 
+
+> **⚠️ DEVELOPMENT STATUS: This project is under active development and is not yet production-ready. APIs, interfaces, and functionality may change without notice. Use at your own risk for evaluation and testing purposes only. Not recommended for production deployments.**
+
 ## 🚀 Key Features
 
 ### Core Drawing Operations
