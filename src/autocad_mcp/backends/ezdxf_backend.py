@@ -113,6 +113,16 @@ class EzdxfBackend(AutoCADBackend):
         # ezdxf doesn't have a direct purge; just report
         return CommandResult(ok=True, payload={"purged": True})
 
+    async def drawing_open(self, path: str) -> CommandResult:
+        try:
+            self._doc = ezdxf.readfile(path)
+            self._msp = self._doc.modelspace()
+            self._screenshot.doc = self._doc
+            self._save_path = path
+            return CommandResult(ok=True, payload={"path": path})
+        except Exception as ex:
+            return CommandResult(ok=False, error=str(ex))
+
     async def drawing_get_variables(self, names: list[str] | None = None) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")

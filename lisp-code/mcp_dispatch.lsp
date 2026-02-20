@@ -1,4 +1,4 @@
-;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.0
+;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.1
 ;;;
 ;;; Protocol:
 ;;;   1. Python writes command JSON to C:/temp/autocad_mcp_cmd_{id}.json
@@ -148,6 +148,22 @@
 )
 
 ;; -----------------------------------------------------------------------
+;; String splitting utility (used by semicolon-delimited encodings)
+;; -----------------------------------------------------------------------
+
+(defun mcp-split-string (str delim / pos result token)
+  "Split a string by single-char delimiter. Returns a list of strings."
+  (setq result '())
+  (while (setq pos (vl-string-search delim str))
+    (setq token (substr str 1 pos))
+    (setq result (append result (list token)))
+    (setq str (substr str (+ pos 2)))
+  )
+  (setq result (append result (list str)))
+  result
+)
+
+;; -----------------------------------------------------------------------
 ;; Command dispatcher — WHITELIST ONLY, no eval
 ;; -----------------------------------------------------------------------
 
@@ -157,6 +173,17 @@
     ;; --- Ping ---
     ((= cmd-name "ping")
      (cons T "\"pong\""))
+
+    ;; --- Freehand LISP execution ---
+    ((= cmd-name "execute-lisp")
+     (mcp-cmd-execute-lisp params-json))
+
+    ;; --- Undo / Redo ---
+    ((= cmd-name "undo")
+     (command "_.UNDO" "1") (cons T "\"undone\""))
+
+    ((= cmd-name "redo")
+     (command "_.REDO") (cons T "\"redone\""))
 
     ;; --- Drawing info ---
     ((= cmd-name "drawing-info")
@@ -272,8 +299,15 @@
 
     ;; --- Drawing file ops ---
     ((= cmd-name "drawing-save")
-     (command "_.QSAVE")
-     (cons T "\"saved\""))
+     (progn
+       (setq path (mcp-json-get-string params-json "path"))
+       (if (and path (> (strlen path) 0))
+         (progn
+           (setvar "FILEDIA" 0)
+           (command "_.SAVEAS" "" path)
+           (setvar "FILEDIA" 1)
+           (cons T (strcat "\"saved to: " (mcp-escape-string path) "\"")))
+         (progn (command "_.QSAVE") (cons T "\"saved\"")))))
 
     ((= cmd-name "drawing-save-as-dxf")
      (progn
@@ -285,6 +319,17 @@
     ((= cmd-name "drawing-purge")
      (command "_.-PURGE" "_ALL" "*" "_N")
      (cons T "\"purged\""))
+
+    ((= cmd-name "drawing-open")
+     (progn
+       (setq path (mcp-json-get-string params-json "path"))
+       (if path
+         (progn
+           (setvar "FILEDIA" 0)
+           (command "_.OPEN" path)
+           (setvar "FILEDIA" 1)
+           (cons T (strcat "\"opened: " (mcp-escape-string path) "\"")))
+         (cons nil "Path required"))))
 
     ;; --- P&ID ---
     ((= cmd-name "pid-setup-layers")
@@ -359,8 +404,7 @@
 
     ;; --- Drawing management ---
     ((= cmd-name "drawing-create")
-     (command "_.NEW" "")
-     (cons T "\"new drawing created\""))
+     (mcp-cmd-drawing-create params-json))
 
     ((= cmd-name "drawing-get-variables")
      (mcp-cmd-drawing-get-variables params-json))
@@ -457,17 +501,26 @@
   (cons T (strcat "{\"entity_type\":\"CIRCLE\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-polyline (params / pts closed layer)
-  ;; Points parsing from JSON is complex; use coordinate pairs from params
+(defun mcp-cmd-create-polyline (params / pts-str closed layer pairs pt-str cx cy)
+  (setq pts-str (mcp-json-get-string params "points_str"))
+  (setq closed (mcp-json-get-string params "closed"))
   (setq layer (mcp-json-get-string params "layer"))
-  (if layer
-    (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer))
+  (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
+  (if (not pts-str)
+    (cons nil "points_str required (format: x1,y1;x2,y2;...)")
+    (progn
+      (command "_PLINE")
+      (setq pairs (mcp-split-string pts-str ";"))
+      (foreach pt-str pairs
+        (setq cx (atof (car (mcp-split-string pt-str ","))))
+        (setq cy (atof (cadr (mcp-split-string pt-str ","))))
+        (command (list cx cy 0.0))
+      )
+      (if (= closed "1") (command "_C") (command ""))
+      (cons T (strcat "{\"entity_type\":\"LWPOLYLINE\",\"handle\":\""
+                      (cdr (assoc 5 (entget (entlast)))) "\"}"))
+    )
   )
-  (command "_PLINE")
-  ;; For simplicity, expect pre-formatted point pairs from the IPC layer
-  ;; The Python side should send individual point coordinates
-  (command "")
-  (cons T "{\"entity_type\":\"LWPOLYLINE\"}")
 )
 
 (defun mcp-cmd-create-rectangle (params / x1 y1 x2 y2 layer)
@@ -561,6 +614,43 @@
       (cons T "\"moved\""))
     (cons nil "Entity not found")
   )
+)
+
+;; --- Freehand LISP execution ---
+
+(defun mcp-cmd-execute-lisp (params / code-file result old-secureload)
+  (setq code-file (mcp-json-get-string params "code_file"))
+  (if (not code-file)
+    (cons nil "code_file parameter required")
+    (if (not (findfile code-file))
+      (cons nil (strcat "Code file not found: " code-file))
+      (progn
+        ;; Suppress SECURELOAD dialog for MCP temp files
+        (setq old-secureload (getvar "SECURELOAD"))
+        (setvar "SECURELOAD" 0)
+        (setq result (vl-catch-all-apply 'load (list code-file)))
+        (setvar "SECURELOAD" old-secureload)
+        (if (vl-catch-all-error-p result)
+          (cons nil (strcat "LISP error: " (vl-catch-all-error-message result)))
+          (cons T (strcat "\"" (mcp-escape-string (vl-princ-to-string result)) "\""))
+        )
+      )
+    )
+  )
+)
+
+;; --- Drawing create implementation ---
+
+(defun mcp-cmd-drawing-create (params / ss)
+  "Reset current drawing to a clean state (erase all, purge, reset to layer 0).
+   Using _.NEW would create a new document tab with a fresh LISP namespace,
+   breaking the IPC dispatcher. This approach preserves the dispatcher."
+  (if (setq ss (ssget "_X"))
+    (progn (command "_.ERASE" ss "") (setq ss nil))
+  )
+  (setvar "CLAYER" "0")
+  (command "_.-PURGE" "_ALL" "*" "_N")
+  (cons T (strcat "{\"drawing\":\"" (mcp-escape-string (getvar "DWGNAME")) "\"}"))
 )
 
 ;; --- P&ID command implementations ---
@@ -1047,27 +1137,64 @@
   (cons T "{\"entity_type\":\"DIMENSION\"}")
 )
 
-(defun mcp-cmd-create-leader (params / text pts)
+(defun mcp-cmd-create-leader (params / text pts-str pairs pt-str)
   (setq text (mcp-json-get-string params "text"))
-  ;; Simple leader from first point pair
-  (command "_.LEADER"
-    (list (mcp-json-get-number params "x1") (mcp-json-get-number params "y1") 0)
-    (list (mcp-json-get-number params "x2") (mcp-json-get-number params "y2") 0)
-    "" text "")
-  (cons T "{\"entity_type\":\"LEADER\"}")
+  (setq pts-str (mcp-json-get-string params "points_str"))
+  (if (not pts-str)
+    (cons nil "points_str required (format: x1,y1;x2,y2;...)")
+    (progn
+      (command "_.LEADER")
+      (setq pairs (mcp-split-string pts-str ";"))
+      (foreach pt-str pairs
+        (command (list (atof (car (mcp-split-string pt-str ",")))
+                       (atof (cadr (mcp-split-string pt-str ","))) 0))
+      )
+      (command "" text "")
+      (cons T "{\"entity_type\":\"LEADER\"}")
+    )
+  )
 )
 
 ;; --- Drawing management ---
 
-(defun mcp-cmd-drawing-get-variables (params / names result var-val)
-  ;; Get system variables - simplified JSON output
-  (setq result "{")
-  ;; We handle a few common variables
-  (setq result (strcat result "\"ACADVER\":\"" (getvar "ACADVER") "\""))
-  (setq result (strcat result ",\"DWGNAME\":\"" (mcp-escape-string (getvar "DWGNAME")) "\""))
-  (setq result (strcat result ",\"CLAYER\":\"" (getvar "CLAYER") "\""))
-  (setq result (strcat result "}"))
-  (cons T result)
+(defun mcp-cmd-drawing-get-variables (params / names-str result var-list var-name var-val first-var)
+  (setq names-str (mcp-json-get-string params "names_str"))
+  (if (or (not names-str) (= names-str ""))
+    ;; Default set when no specific names requested
+    (progn
+      (setq result "{")
+      (setq result (strcat result "\"ACADVER\":\"" (getvar "ACADVER") "\""))
+      (setq result (strcat result ",\"DWGNAME\":\"" (mcp-escape-string (getvar "DWGNAME")) "\""))
+      (setq result (strcat result ",\"CLAYER\":\"" (getvar "CLAYER") "\""))
+      (setq result (strcat result "}"))
+      (cons T result)
+    )
+    ;; Parse semicolon-delimited variable names
+    (progn
+      (setq var-list (mcp-split-string names-str ";"))
+      (setq result "{" first-var T)
+      (foreach var-name var-list
+        (setq var-val (getvar var-name))
+        (if (not first-var) (setq result (strcat result ",")))
+        (setq first-var nil)
+        (if (not var-val)
+          (setq result (strcat result "\"" var-name "\":null"))
+          (cond
+            ((= (type var-val) 'STR)
+             (setq result (strcat result "\"" var-name "\":\"" (mcp-escape-string var-val) "\"")))
+            ((= (type var-val) 'INT)
+             (setq result (strcat result "\"" var-name "\":" (itoa var-val))))
+            ((= (type var-val) 'REAL)
+             (setq result (strcat result "\"" var-name "\":" (rtos var-val 2 6))))
+            (t
+             (setq result (strcat result "\"" var-name "\":\"" (mcp-escape-string (vl-princ-to-string var-val)) "\"")))
+          )
+        )
+      )
+      (setq result (strcat result "}"))
+      (cons T result)
+    )
+  )
 )
 
 (defun mcp-cmd-drawing-plot-pdf (params / path)
@@ -1244,7 +1371,7 @@
 ;; Startup message
 ;; -----------------------------------------------------------------------
 
-(princ "\n=== MCP Dispatch v3.0 loaded ===")
+(princ "\n=== MCP Dispatch v3.1 loaded ===")
 (princ "\nIPC directory: ")
 (princ *mcp-ipc-dir*)
 (princ "\nReady for commands via (c:mcp-dispatch)")

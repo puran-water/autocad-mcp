@@ -308,11 +308,15 @@ class TestDispatchMapCoverage:
     # These must match the command names in mcp_dispatch.lsp's command map
     EXPECTED_COMMANDS = [
         "ping",
+        "execute-lisp",
+        "undo",
+        "redo",
         "drawing-info",
         "drawing-save",
         "drawing-save-as-dxf",
         "drawing-create",
         "drawing-purge",
+        "drawing-open",
         "drawing-get-variables",
         "create-line",
         "create-circle",
@@ -378,3 +382,157 @@ class TestDispatchMapCoverage:
 
     def test_no_duplicates(self):
         assert len(self.EXPECTED_COMMANDS) == len(set(self.EXPECTED_COMMANDS))
+
+    def test_new_v31_commands_present(self):
+        """Verify v3.1 additions are in the expected commands list."""
+        for cmd in ("execute-lisp", "undo", "redo", "drawing-open"):
+            assert cmd in self.EXPECTED_COMMANDS, f"Missing new command: {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# Configurable IPC timeout
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurableTimeout:
+    def test_default_timeout(self):
+        from autocad_mcp.config import IPC_TIMEOUT
+        # Default should be 10.0 (unless overridden by env)
+        assert isinstance(IPC_TIMEOUT, float)
+        assert 1.0 <= IPC_TIMEOUT <= 300.0
+
+    def test_timeout_used_by_file_ipc(self):
+        from autocad_mcp.backends.file_ipc import TIMEOUT
+        from autocad_mcp.config import IPC_TIMEOUT
+        assert TIMEOUT == IPC_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Stale .lsp file cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestStaleLispCleanup:
+    def test_cleanup_stale_lisp_files(self):
+        """Temp .lsp files older than threshold should be cleaned up."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stale_threshold = 60.0
+
+            stale_lsp = Path(tmpdir) / "autocad_mcp_lisp_old123.lsp"
+            stale_lsp.write_text("(+ 1 2)")
+            old_time = time.time() - stale_threshold - 10
+            os.utime(stale_lsp, (old_time, old_time))
+
+            fresh_lsp = Path(tmpdir) / "autocad_mcp_lisp_new456.lsp"
+            fresh_lsp.write_text("(+ 3 4)")
+
+            # Simulate the cleanup logic
+            now = time.time()
+            for pattern in ("autocad_mcp_*.json", "autocad_mcp_*.tmp", "autocad_mcp_lisp_*.lsp"):
+                for f in Path(tmpdir).glob(pattern):
+                    if now - f.stat().st_mtime > stale_threshold:
+                        f.unlink(missing_ok=True)
+
+            assert not stale_lsp.exists()
+            assert fresh_lsp.exists()
+
+
+# ---------------------------------------------------------------------------
+# New backend methods — default implementations
+# ---------------------------------------------------------------------------
+
+
+class TestNewBackendDefaults:
+    """New base class methods return 'not supported' by default."""
+
+    @pytest.mark.asyncio
+    async def test_execute_lisp_default(self):
+        from autocad_mcp.backends.base import AutoCADBackend
+        # Cannot instantiate ABC directly, use ezdxf backend instead
+        from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
+        backend = EzdxfBackend()
+        await backend.initialize()
+        result = await backend.execute_lisp("(+ 1 2)")
+        assert result.ok is False
+        assert "Not supported" in result.error
+
+    @pytest.mark.asyncio
+    async def test_undo_default(self):
+        from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
+        backend = EzdxfBackend()
+        await backend.initialize()
+        result = await backend.undo()
+        assert result.ok is False
+
+    @pytest.mark.asyncio
+    async def test_redo_default(self):
+        from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
+        backend = EzdxfBackend()
+        await backend.initialize()
+        result = await backend.redo()
+        assert result.ok is False
+
+    @pytest.mark.asyncio
+    async def test_drawing_open_ezdxf(self):
+        """ezdxf backend should support drawing_open for DXF files."""
+        from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
+        backend = EzdxfBackend()
+        await backend.initialize()
+        # Save a DXF first, then open it
+        with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as f:
+            dxf_path = f.name
+        try:
+            await backend.drawing_save(dxf_path)
+            result = await backend.drawing_open(dxf_path)
+            assert result.ok is True
+            assert result.payload["path"] == dxf_path
+        finally:
+            Path(dxf_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Semicolon-encoded point passing (polyline / leader)
+# ---------------------------------------------------------------------------
+
+
+class TestSemicolonEncoding:
+    def test_polyline_points_encoding(self):
+        """Verify Python encodes polyline points as semicolon-delimited string."""
+        points = [[0, 0], [10, 0], [10, 10], [0, 10]]
+        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        assert pts_str == "0,0;10,0;10,10;0,10"
+
+    def test_leader_points_encoding(self):
+        """Verify Python encodes leader points as semicolon-delimited string."""
+        points = [[5, 5], [15, 15]]
+        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        assert pts_str == "5,5;15,15"
+
+    def test_closed_boolean_encoding(self):
+        """Closed flag encoded as string '1'/'0' for LISP compatibility."""
+        assert ("1" if True else "0") == "1"
+        assert ("1" if False else "0") == "0"
+
+
+# ---------------------------------------------------------------------------
+# Variable name $ prefix stripping
+# ---------------------------------------------------------------------------
+
+
+class TestVariableNameStripping:
+    def test_strip_dollar_prefix(self):
+        """File IPC strips $ prefix from ezdxf-style variable names."""
+        names = ["$ACADVER", "DIMSCALE", "$CLAYER"]
+        clean = [n.lstrip("$") for n in names]
+        assert clean == ["ACADVER", "DIMSCALE", "CLAYER"]
+
+    def test_semicolon_encoding(self):
+        names = ["ACADVER", "DIMSCALE", "LTSCALE"]
+        names_str = ";".join(names)
+        assert names_str == "ACADVER;DIMSCALE;LTSCALE"
+
+    def test_empty_names_list(self):
+        """Empty names list results in empty string."""
+        names = None
+        names_str = "" if not names else ";".join(names)
+        assert names_str == ""

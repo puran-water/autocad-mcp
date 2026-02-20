@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
@@ -20,32 +21,42 @@ log = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 _backend: AutoCADBackend | None = None
+_init_lock = asyncio.Lock()
 
 
 async def get_backend() -> AutoCADBackend:
-    """Return (and lazily initialize) the backend singleton."""
+    """Return (and lazily initialize) the backend singleton.
+
+    Uses an asyncio Lock to prevent concurrent initialization races
+    when multiple MCP tool calls arrive simultaneously.
+    """
     global _backend
     if _backend is not None:
         return _backend
 
-    backend_name = detect_backend()
+    async with _init_lock:
+        # Double-check after acquiring lock (another task may have initialized)
+        if _backend is not None:
+            return _backend
 
-    if backend_name == "file_ipc":
-        from autocad_mcp.backends.file_ipc import FileIPCBackend
+        backend_name = detect_backend()
 
-        _backend = FileIPCBackend()
-    else:
-        from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
+        if backend_name == "file_ipc":
+            from autocad_mcp.backends.file_ipc import FileIPCBackend
 
-        _backend = EzdxfBackend()
+            backend = FileIPCBackend()
+        else:
+            from autocad_mcp.backends.ezdxf_backend import EzdxfBackend
 
-    result = await _backend.initialize()
-    if not result.ok:
-        _backend = None
-        raise RuntimeError(f"Backend init failed: {result.error}")
+            backend = EzdxfBackend()
 
-    log.info("backend_initialized", backend=_backend.name)
-    return _backend
+        result = await backend.initialize()
+        if not result.ok:
+            raise RuntimeError(f"Backend init failed: {result.error}")
+
+        _backend = backend
+        log.info("backend_initialized", backend=_backend.name)
+        return _backend
 
 
 # ---------------------------------------------------------------------------

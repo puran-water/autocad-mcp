@@ -84,6 +84,22 @@ class AutoCADBackend(ABC):
     async def drawing_get_variables(self, names: list[str] | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
+    async def drawing_open(self, path: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Undo / Redo ---
+
+    async def undo(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def redo(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    # --- Freehand LISP execution ---
+
+    async def execute_lisp(self, code: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
     # --- Entity operations ---
 
     async def create_line(self, x1: float, y1: float, x2: float, y2: float, layer: str | None = None) -> CommandResult:

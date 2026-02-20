@@ -17,6 +17,9 @@ IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR", "C:/temp"))
 # Backend selection
 BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
 
+# IPC timeout (seconds), clamped to [1, 300]
+IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT", "10.0"))))
+
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")
 

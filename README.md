@@ -37,7 +37,7 @@ Open AutoCAD LT and load `mcp_dispatch.lsp` using **APPLOAD**:
 1. Type `APPLOAD` in the AutoCAD command line
 2. Browse to `<repo>/lisp-code/mcp_dispatch.lsp`
 3. Click **Load**
-4. You should see: `=== MCP Dispatch v3.0 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
+4. You should see: `=== MCP Dispatch v3.1 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
 
 > **Tip:** Add the file to your AutoCAD Startup Suite (in the APPLOAD dialog) so it loads automatically with every drawing.
 
@@ -95,13 +95,16 @@ You should see `backend: "file_ipc"` if AutoCAD is running, or `backend: "ezdxf"
 
 | Operation | Description | File IPC | ezdxf |
 |-----------|-------------|----------|-------|
-| `create` | Create a new empty drawing | Yes | Yes |
+| `create` | Reset to clean drawing (erase all + purge) | Yes | Yes |
+| `open` | Open an existing drawing | Yes | Yes (DXF) |
 | `info` | Get entity count and layers | Yes | Yes |
-| `save` | Save current drawing | Yes | Yes |
+| `save` | Save current drawing (to path if given) | Yes | Yes |
 | `save_as_dxf` | Export as DXF | Yes | Yes |
 | `plot_pdf` | Plot to PDF | Yes | No |
 | `purge` | Purge unused objects | Yes | Yes |
-| `get_variables` | Get system variables | Partial | Yes |
+| `get_variables` | Get system variables by name | Yes | Yes |
+| `undo` | Undo last operation | Yes | No |
+| `redo` | Redo last undone operation | Yes | No |
 
 ### `entity` — Entity CRUD + modification
 
@@ -150,7 +153,9 @@ Screenshots use `PrintWindow` (Win32) for the File IPC backend — works even wh
 
 ### `system` — Server management
 
-`status`, `health`, `get_backend`, `runtime`, `init`
+`status`, `health`, `get_backend`, `runtime`, `init`, `execute_lisp`
+
+> `execute_lisp` runs arbitrary AutoLISP code (File IPC only). Pass `data: {code: "(+ 1 2)"}`. This turns the server into an extensible automation platform — any valid AutoLISP expression can be executed.
 
 ## Architecture
 
@@ -174,6 +179,7 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 |----------|---------|-------------|
 | `AUTOCAD_MCP_BACKEND` | `auto` | Backend selection: `auto`, `file_ipc`, `ezdxf` |
 | `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
+| `AUTOCAD_MCP_IPC_TIMEOUT` | `10.0` | IPC command timeout in seconds (1-300) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
 
 > **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
@@ -198,6 +204,20 @@ AutoLISP was added to AutoCAD LT in the **2024 release (Windows only)**. AutoCAD
 | Selection sets | AutoLISP on Mac |
 
 The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
+
+## What's New in v3.1
+
+- **`execute_lisp`** — Run arbitrary AutoLISP code via temp file pattern. Turns the server from a fixed command set into an extensible automation platform.
+- **Undo / Redo** — Single-step undo and redo via `drawing` tool.
+- **Drawing open** — Open existing `.dwg` files programmatically (FILEDIA suppressed).
+- **Drawing create** — Now resets current drawing (erase all + purge) instead of `_.NEW`, preserving the LISP dispatcher namespace.
+- **Drawing save with path** — `save` with a `path` parameter uses SAVEAS; without path uses QSAVE.
+- **`get_variables` fix** — Respects the `names` parameter; returns requested variables with proper type handling.
+- **Polyline/leader fix** — Point arrays properly encoded via semicolon-delimited format.
+- **ESC prefix** — Sends 2x ESC before each dispatch to cancel stale pending commands from prior timeouts.
+- **UTF-8/cp1252 fallback** — Handles non-ASCII characters in LISP result files (AutoCAD writes Windows-1252).
+- **Configurable IPC timeout** — `AUTOCAD_MCP_IPC_TIMEOUT` env var (1–300 seconds, default 10).
+- **Thread-safe backend init** — `asyncio.Lock` prevents parallel initialization races.
 
 ## License
 

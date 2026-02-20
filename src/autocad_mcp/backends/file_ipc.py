@@ -21,13 +21,13 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
-from autocad_mcp.config import IPC_DIR, LISP_DIR
+from autocad_mcp.config import IPC_DIR, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
 
 # IPC settings
 POLL_INTERVAL = 0.1  # seconds
-TIMEOUT = 10.0  # seconds
+TIMEOUT = IPC_TIMEOUT  # seconds (configurable via AUTOCAD_MCP_IPC_TIMEOUT)
 STALE_THRESHOLD = 60.0  # clean up files older than this
 
 
@@ -165,7 +165,13 @@ class FileIPCBackend(AutoCADBackend):
             while time.time() < deadline:
                 if result_file.exists():
                     try:
-                        data = json.loads(result_file.read_text(encoding="utf-8"))
+                        # AutoCAD LISP writes files in Windows-1252 encoding;
+                        # try UTF-8 first (covers ASCII), fall back to cp1252
+                        try:
+                            text = result_file.read_text(encoding="utf-8")
+                        except UnicodeDecodeError:
+                            text = result_file.read_text(encoding="cp1252")
+                        data = json.loads(text)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
                             return CommandResult(
@@ -208,13 +214,27 @@ class FileIPCBackend(AutoCADBackend):
             return None
 
     def _type_dispatch_trigger(self):
-        """Post '(c:mcp-dispatch)' + Enter via WM_CHAR to MDIClient — no focus steal."""
+        """Post '(c:mcp-dispatch)' + Enter via WM_CHAR to MDIClient — no focus steal.
+
+        Sends ESC keystrokes first to cancel any stale pending command
+        (e.g. from a previous timeout leaving AutoCAD in a command prompt).
+        """
         try:
             import ctypes
 
             WM_CHAR = 0x0102
+            WM_KEYDOWN = 0x0100
+            WM_KEYUP = 0x0101
+            VK_ESCAPE = 0x1B
             target = self._command_hwnd or self._hwnd
             post = ctypes.windll.user32.PostMessageW
+
+            # Cancel any pending command (2x ESC for nested commands)
+            for _ in range(2):
+                post(target, WM_KEYDOWN, VK_ESCAPE, 0)
+                post(target, WM_KEYUP, VK_ESCAPE, 0)
+            time.sleep(0.05)
+
             for ch in "(c:mcp-dispatch)":
                 post(target, WM_CHAR, ord(ch), 0)
             # Enter = carriage return
@@ -227,11 +247,10 @@ class FileIPCBackend(AutoCADBackend):
         """Remove stale IPC files from previous sessions."""
         try:
             now = time.time()
-            for f in self._ipc_dir.glob("autocad_mcp_*.json"):
-                if now - f.stat().st_mtime > STALE_THRESHOLD:
-                    f.unlink(missing_ok=True)
-            for f in self._ipc_dir.glob("autocad_mcp_*.tmp"):
-                f.unlink(missing_ok=True)
+            for pattern in ("autocad_mcp_*.json", "autocad_mcp_*.tmp", "autocad_mcp_lisp_*.lsp"):
+                for f in self._ipc_dir.glob(pattern):
+                    if now - f.stat().st_mtime > STALE_THRESHOLD:
+                        f.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -256,7 +275,38 @@ class FileIPCBackend(AutoCADBackend):
         return await self._dispatch("drawing-plot-pdf", {"path": path})
 
     async def drawing_get_variables(self, names: list[str] | None = None) -> CommandResult:
-        return await self._dispatch("drawing-get-variables", {"names": names or []})
+        if names:
+            # Strip $ prefix for AutoCAD compatibility (ezdxf uses $ACADVER, AutoCAD uses ACADVER)
+            clean_names = [n.lstrip("$") for n in names]
+            names_str = ";".join(clean_names)
+        else:
+            names_str = ""
+        return await self._dispatch("drawing-get-variables", {"names_str": names_str})
+
+    async def drawing_open(self, path: str) -> CommandResult:
+        return await self._dispatch("drawing-open", {"path": path})
+
+    # --- Undo / Redo ---
+
+    async def undo(self) -> CommandResult:
+        return await self._dispatch("undo", {})
+
+    async def redo(self) -> CommandResult:
+        return await self._dispatch("redo", {})
+
+    # --- Freehand LISP execution ---
+
+    async def execute_lisp(self, code: str) -> CommandResult:
+        """Execute arbitrary AutoLISP code via temp file.
+
+        File persists for session; cleaned up by _cleanup_stale_files().
+        """
+        request_id = uuid.uuid4().hex[:12]
+        code_file = self._ipc_dir / f"autocad_mcp_lisp_{request_id}.lsp"
+        code_file.write_text(code, encoding="utf-8")
+        return await self._dispatch("execute-lisp", {
+            "code_file": str(code_file).replace("\\", "/")
+        })
 
     # --- Entity operations ---
 
@@ -267,7 +317,10 @@ class FileIPCBackend(AutoCADBackend):
         return await self._dispatch("create-circle", {"cx": cx, "cy": cy, "radius": radius, "layer": layer})
 
     async def create_polyline(self, points, closed=False, layer=None) -> CommandResult:
-        return await self._dispatch("create-polyline", {"points": points, "closed": closed, "layer": layer})
+        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        return await self._dispatch("create-polyline", {
+            "points_str": pts_str, "closed": "1" if closed else "0", "layer": layer
+        })
 
     async def create_rectangle(self, x1, y1, x2, y2, layer=None) -> CommandResult:
         return await self._dispatch("create-rectangle", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "layer": layer})
@@ -387,7 +440,8 @@ class FileIPCBackend(AutoCADBackend):
         return await self._dispatch("create-dimension-radius", {"cx": cx, "cy": cy, "radius": radius, "angle": angle})
 
     async def create_leader(self, points, text) -> CommandResult:
-        return await self._dispatch("create-leader", {"points": points, "text": text})
+        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        return await self._dispatch("create-leader", {"points_str": pts_str, "text": text})
 
     # --- P&ID ---
 

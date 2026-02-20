@@ -1,4 +1,4 @@
-"""AutoCAD MCP Server v3.0 — 8 consolidated tools with operation dispatch.
+"""AutoCAD MCP Server v3.1 — 8 consolidated tools with operation dispatch.
 
 Tools: drawing, entity, layer, block, annotation, pid, view, system
 """
@@ -41,12 +41,15 @@ async def drawing(
 
     Operations:
       create     — Create a new empty drawing. data: {name?}
+      open       — Open an existing drawing. data: {path}
       info       — Get drawing extents, entity count, layers, blocks.
-      save       — Save current drawing. data: {path?}
+      save       — Save current drawing. data: {path?} (saves to path if given, else QSAVE)
       save_as_dxf — Export as DXF. data: {path}
       plot_pdf   — Plot to PDF. data: {path}
       purge      — Purge unused objects.
       get_variables — Get system variables. data: {names: [...]}
+      undo       — Undo last operation.
+      redo       — Redo last undone operation.
     """
     data = data or {}
     backend = await get_backend()
@@ -65,6 +68,12 @@ async def drawing(
         result = await backend.drawing_purge()
     elif operation == "get_variables":
         result = await backend.drawing_get_variables(data.get("names"))
+    elif operation == "open":
+        result = await backend.drawing_open(data["path"])
+    elif operation == "undo":
+        result = await backend.undo()
+    elif operation == "redo":
+        result = await backend.redo()
     else:
         return _json({"error": f"Unknown drawing operation: {operation}"})
 
@@ -459,11 +468,12 @@ async def system(
     """Server status and management.
 
     Operations:
-      status      — Backend info, capabilities, health check.
-      health      — Quick health check (ping backend).
-      get_backend — Return current backend name and capabilities.
-      runtime     — Return process/runtime details for spawn diagnostics.
-      init        — Re-initialize the backend.
+      status        — Backend info, capabilities, health check.
+      health        — Quick health check (ping backend).
+      get_backend   — Return current backend name and capabilities.
+      runtime       — Return process/runtime details for spawn diagnostics.
+      init          — Re-initialize the backend.
+      execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
     """
     data = data or {}
 
@@ -499,6 +509,12 @@ async def system(
         backend = await get_backend()
         result = await backend.status()
         return _json(result.to_dict())
+    elif operation == "execute_lisp":
+        backend = await get_backend()
+        if not data.get("code"):
+            return _json({"error": "data.code is required"})
+        result = await backend.execute_lisp(data["code"])
+        return await add_screenshot_if_available(result, include_screenshot)
     else:
         return _json({"error": f"Unknown system operation: {operation}"})
 
@@ -530,5 +546,5 @@ def main():
         ],
     )
 
-    log.info("autocad_mcp_starting", version="3.0.0")
+    log.info("autocad_mcp_starting", version="3.1.0")
     mcp.run(transport="stdio")
