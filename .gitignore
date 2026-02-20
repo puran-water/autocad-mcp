@@ -28,6 +28,7 @@ venv/
 env/
 ENV/
 .venv/
+.venv-win/
 
 # IDE
 .vscode/
@@ -50,6 +51,9 @@ Thumbs.db
 # Log files
 *.log
 
+# Claude Code
+.claude/
+
 # User-specific configuration
 claude_desktop_config.json
 
@@ -60,5 +64,5 @@ temp_*.lsp
 # CTO Library (not included in repo)
 PIDv4-CTO/
 
-# User documentation (if any)
-docs/user/
+# pytest
+.pytest_cache/
