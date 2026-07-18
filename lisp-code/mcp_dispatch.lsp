@@ -164,6 +164,122 @@
 )
 
 ;; -----------------------------------------------------------------------
+;; Geometry helpers for entity-get (LWPOLYLINE/POLYLINE/HATCH)
+;; -----------------------------------------------------------------------
+
+(defun mcp-assoc-all (key alist / result pair)
+  "Return list of cdr values for every entry in alist whose car matches key,
+   in original order. Needed because LWPOLYLINE stores one group-10 entry per
+   vertex, and plain (assoc) only ever returns the first match."
+  (setq result '())
+  (foreach pair alist
+    (if (= (car pair) key)
+      (setq result (append result (list (cdr pair))))
+    )
+  )
+  result
+)
+
+(defun mcp-polygon-area (pts / n i p1 p2 sum)
+  "Shoelace area for a list of (x y [z]) points, treated as a closed loop
+   regardless of whether the first point is repeated at the end. Straight-line
+   approximation — polyline bulges (arcs) are not accounted for, matching the
+   ezdxf backend's entity_get behavior."
+  (setq n (length pts))
+  (if (< n 3)
+    0.0
+    (progn
+      (setq sum 0.0 i 0)
+      (while (< i n)
+        (setq p1 (nth i pts))
+        (setq p2 (nth (rem (1+ i) n) pts))
+        (setq sum (+ sum (- (* (car p1) (cadr p2)) (* (car p2) (cadr p1)))))
+        (setq i (1+ i))
+      )
+      (abs (/ sum 2.0))
+    )
+  )
+)
+
+(defun mcp-polyline-length (pts closed / n i total p1 p2)
+  "Sum of segment lengths through pts; adds the closing segment if closed."
+  (setq n (length pts))
+  (if (< n 2)
+    0.0
+    (progn
+      (setq total 0.0 i 0)
+      (while (< i (1- n))
+        (setq p1 (nth i pts) p2 (nth (1+ i) pts))
+        (setq total (+ total (distance (list (car p1) (cadr p1) 0.0) (list (car p2) (cadr p2) 0.0))))
+        (setq i (1+ i))
+      )
+      (if closed
+        (setq total (+ total (distance
+                               (list (car (nth (1- n) pts)) (cadr (nth (1- n) pts)) 0.0)
+                               (list (car (nth 0 pts)) (cadr (nth 0 pts)) 0.0))))
+      )
+      total
+    )
+  )
+)
+
+(defun mcp-points-to-json (pts / s first pt)
+  "Format a list of (x y [z]) points as a JSON array of [x,y] pairs."
+  (setq s "[" first T)
+  (foreach pt pts
+    (if (not first) (setq s (strcat s ",")))
+    (setq first nil)
+    (setq s (strcat s "[" (rtos (car pt) 2 6) "," (rtos (cadr pt) 2 6) "]"))
+  )
+  (strcat s "]")
+)
+
+(defun mcp-hatch-get-json (ent-data / num-paths remaining path-flag has-bulge is-closed num-verts vcount vpts area)
+  "Extract the boundary of a HATCH, but only the common single-loop,
+   polyline-type boundary case. Bails to an 'unsupported' payload for
+   multi-loop or edge-type (arc/spline) boundaries rather than risk parsing
+   the variable-length edge data incorrectly — this LISP path has not been
+   exercised against a live AutoCAD session; use the DXF-export + ezdxf path
+   for anything beyond a simple room/zone fill."
+  (setq num-paths (cdr (assoc 91 ent-data)))
+  (if (/= num-paths 1)
+    "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"multiple or zero boundary paths\"}"
+    (progn
+      (setq remaining ent-data)
+      (while (and remaining (/= (caar remaining) 92))
+        (setq remaining (cdr remaining))
+      )
+      (if (not remaining)
+        "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"malformed boundary data\"}"
+        (progn
+          (setq path-flag (cdar remaining) remaining (cdr remaining))
+          (if (/= 2 (logand path-flag 2))
+            "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"non-polyline (edge) boundary\"}"
+            (progn
+              (setq has-bulge (cdar remaining) remaining (cdr remaining))  ; 72
+              (setq is-closed (cdar remaining) remaining (cdr remaining))  ; 73
+              (setq num-verts (cdar remaining) remaining (cdr remaining))  ; 93
+              (setq vpts '() vcount 0)
+              (while (< vcount num-verts)
+                (setq vpts (append vpts (list (cdar remaining))))
+                (setq remaining (cdr remaining))
+                (if (= has-bulge 1) (setq remaining (cdr remaining)))  ; skip bulge (42)
+                (setq vcount (1+ vcount))
+              )
+              (setq area (mcp-polygon-area vpts))
+              (strcat "{\"type\":\"HATCH\",\"boundaries\":[{\"points\":" (mcp-points-to-json vpts)
+                      ",\"closed\":" (if (= is-closed 1) "true" "false")
+                      ",\"area\":" (rtos area 2 6) "}]"
+                      ",\"area\":" (rtos area 2 6) "}")
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+;; -----------------------------------------------------------------------
 ;; Command dispatcher — WHITELIST ONLY, no eval
 ;; -----------------------------------------------------------------------
 
@@ -841,7 +957,8 @@
 
 ;; --- Entity query: get ---
 
-(defun mcp-cmd-entity-get (params / entity-id ent ent-data etype handle elayer result)
+(defun mcp-cmd-entity-get (params / entity-id ent ent-data etype handle elayer result
+                                    vpts flag is-closed area len sub-ent sub-data hatch-json)
   (setq entity-id (mcp-json-get-string params "entity_id"))
   (if (= entity-id "last")
     (setq ent (entlast))
@@ -854,20 +971,77 @@
       (setq etype (cdr (assoc 0 ent-data)))
       (setq handle (cdr (assoc 5 ent-data)))
       (setq elayer (cdr (assoc 8 ent-data)))
-      (setq result (strcat "{\"type\":\"" etype "\",\"handle\":\"" handle "\",\"layer\":\"" elayer "\""))
-      ;; Add type-specific info
       (cond
-        ((= etype "LINE")
-         (setq result (strcat result
-           ",\"start\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
-           ",\"end\":[" (rtos (car (cdr (assoc 11 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 11 ent-data))) 2 6) "]")))
-        ((= etype "CIRCLE")
-         (setq result (strcat result
-           ",\"center\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
-           ",\"radius\":" (rtos (cdr (assoc 40 ent-data)) 2 6))))
+        ;; HATCH has its own JSON builder (needs the raw group-code sequence,
+        ;; not just assoc lookups) — return it directly.
+        ((= etype "HATCH")
+         (setq hatch-json (mcp-hatch-get-json ent-data))
+         (cons T hatch-json))
+        (t
+         (progn
+           (setq result (strcat "{\"type\":\"" etype "\",\"handle\":\"" handle "\",\"layer\":\"" elayer "\""))
+           ;; Add type-specific info
+           (cond
+             ((= etype "LINE")
+              (setq result (strcat result
+                ",\"start\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
+                ",\"end\":[" (rtos (car (cdr (assoc 11 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 11 ent-data))) 2 6) "]")))
+             ((= etype "CIRCLE")
+              (setq result (strcat result
+                ",\"center\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
+                ",\"radius\":" (rtos (cdr (assoc 40 ent-data)) 2 6))))
+             ((= etype "LWPOLYLINE")
+              (progn
+                (setq vpts (mcp-assoc-all 10 ent-data))
+                (setq flag (cdr (assoc 70 ent-data)))
+                (if (not flag) (setq flag 0))
+                (setq is-closed (= 1 (logand flag 1)))
+                (setq len (mcp-polyline-length vpts is-closed))
+                (setq result (strcat result
+                  ",\"points\":" (mcp-points-to-json vpts)
+                  ",\"closed\":" (if is-closed "true" "false")
+                  ",\"length\":" (rtos len 2 6)))
+                (if (and is-closed (>= (length vpts) 3))
+                  (progn
+                    (setq area (mcp-polygon-area vpts))
+                    (setq result (strcat result ",\"area\":" (rtos area 2 6)))
+                  )
+                )
+              ))
+             ((= etype "POLYLINE")
+              (progn
+                (setq flag (cdr (assoc 70 ent-data)))
+                (if (not flag) (setq flag 0))
+                (setq is-closed (= 1 (logand flag 1)))
+                (setq vpts '() sub-ent (entnext ent))
+                (while sub-ent
+                  (setq sub-data (entget sub-ent))
+                  (if (= (cdr (assoc 0 sub-data)) "VERTEX")
+                    (setq vpts (append vpts (list (cdr (assoc 10 sub-data)))))
+                  )
+                  (if (= (cdr (assoc 0 sub-data)) "SEQEND")
+                    (setq sub-ent nil)
+                    (setq sub-ent (entnext sub-ent))
+                  )
+                )
+                (setq len (mcp-polyline-length vpts is-closed))
+                (setq result (strcat result
+                  ",\"points\":" (mcp-points-to-json vpts)
+                  ",\"closed\":" (if is-closed "true" "false")
+                  ",\"length\":" (rtos len 2 6)))
+                (if (and is-closed (>= (length vpts) 3))
+                  (progn
+                    (setq area (mcp-polygon-area vpts))
+                    (setq result (strcat result ",\"area\":" (rtos area 2 6)))
+                  )
+                )
+              ))
+           )
+           (setq result (strcat result "}"))
+           (cons T result)
+         )
+        )
       )
-      (setq result (strcat result "}"))
-      (cons T result)
     )
   )
 )

@@ -114,7 +114,10 @@ async def entity(
     Read operations:
       list              — layer? → list entities
       count             — layer? → count entities
-      get               — entity_id → entity details
+      get               — entity_id → entity details.
+                          LWPOLYLINE/POLYLINE: points, closed, length, area (if closed).
+                          HATCH: boundaries (per-loop points/area), area (sum of loops,
+                          islands/holes not netted out).
 
     Modify operations:
       copy    — entity_id, data: {dx, dy}

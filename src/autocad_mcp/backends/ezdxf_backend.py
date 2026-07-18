@@ -212,6 +212,34 @@ class EzdxfBackend(AutoCADBackend):
             elif e.dxftype() == "CIRCLE":
                 info["center"] = list(e.dxf.center)[:2]
                 info["radius"] = e.dxf.radius
+            elif e.dxftype() == "LWPOLYLINE":
+                points = [[float(p[0]), float(p[1])] for p in e.get_points(format="xy")]
+                info["points"] = points
+                info["closed"] = bool(e.closed)
+                info["length"] = self._polyline_length(points, e.closed)
+                if e.closed and len(points) >= 3:
+                    info["area"] = float(ezdxf.math.area(points))
+            elif e.dxftype() == "POLYLINE":
+                points = [[float(v.dxf.location[0]), float(v.dxf.location[1])] for v in e.vertices]
+                info["points"] = points
+                info["closed"] = bool(e.is_closed)
+                info["length"] = self._polyline_length(points, e.is_closed)
+                if e.is_closed and len(points) >= 3:
+                    info["area"] = float(ezdxf.math.area(points))
+            elif e.dxftype() == "HATCH":
+                boundaries = []
+                for path in e.paths:
+                    if hasattr(path, "vertices"):
+                        pts = [[float(v[0]), float(v[1])] for v in path.vertices]
+                        b = {"points": pts, "closed": bool(getattr(path, "is_closed", True))}
+                        if len(pts) >= 3:
+                            b["area"] = float(ezdxf.math.area(pts))
+                        boundaries.append(b)
+                    else:
+                        boundaries.append({"type": "unsupported_edge_path"})
+                info["boundaries"] = boundaries
+                # Sum of loop areas; does not net out island/hole boundaries.
+                info["area"] = sum(b["area"] for b in boundaries if "area" in b)
             return CommandResult(ok=True, payload=info)
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
@@ -736,6 +764,16 @@ class EzdxfBackend(AutoCADBackend):
         return CommandResult(ok=False, error="Screenshot render failed")
 
     # --- Helpers ---
+
+    @staticmethod
+    def _polyline_length(points: list[list[float]], closed: bool) -> float:
+        """Sum of segment lengths; straight-line approximation (bulges not arced)."""
+        if len(points) < 2:
+            return 0.0
+        pairs = list(zip(points, points[1:]))
+        if closed:
+            pairs.append((points[-1], points[0]))
+        return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in pairs)
 
     @staticmethod
     def _color_to_int(color: str | int) -> int:
