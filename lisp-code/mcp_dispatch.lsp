@@ -234,27 +234,34 @@
   (strcat s "]")
 )
 
-(defun mcp-hatch-get-json (ent-data / num-paths remaining path-flag has-bulge is-closed num-verts vcount vpts area)
+(defun mcp-hatch-get-json (ent-data handle elayer / num-paths remaining path-flag has-bulge is-closed num-verts vcount vpts area prefix)
   "Extract the boundary of a HATCH, but only the common single-loop,
    polyline-type boundary case. Bails to an 'unsupported' payload for
    multi-loop or edge-type (arc/spline) boundaries rather than risk parsing
    the variable-length edge data incorrectly — this LISP path has not been
    exercised against a live AutoCAD session; use the DXF-export + ezdxf path
-   for anything beyond a simple room/zone fill."
+   for anything beyond a simple room/zone fill.
+
+   handle/layer are threaded in explicitly (not read from ent-data here)
+   so every return path — supported or not — carries the same
+   {type, handle, layer, ...} shape as every other entity type in
+   mcp-cmd-entity-get, which callers rely on to identify which entity a
+   result came from."
+  (setq prefix (strcat "{\"type\":\"HATCH\",\"handle\":\"" handle "\",\"layer\":\"" elayer "\","))
   (setq num-paths (cdr (assoc 91 ent-data)))
   (if (/= num-paths 1)
-    "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"multiple or zero boundary paths\"}"
+    (strcat prefix "\"unsupported\":true,\"reason\":\"multiple or zero boundary paths\"}")
     (progn
       (setq remaining ent-data)
       (while (and remaining (/= (caar remaining) 92))
         (setq remaining (cdr remaining))
       )
       (if (not remaining)
-        "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"malformed boundary data\"}"
+        (strcat prefix "\"unsupported\":true,\"reason\":\"malformed boundary data\"}")
         (progn
           (setq path-flag (cdar remaining) remaining (cdr remaining))
           (if (/= 2 (logand path-flag 2))
-            "{\"type\":\"HATCH\",\"unsupported\":true,\"reason\":\"non-polyline (edge) boundary\"}"
+            (strcat prefix "\"unsupported\":true,\"reason\":\"non-polyline (edge) boundary\"}")
             (progn
               (setq has-bulge (cdar remaining) remaining (cdr remaining))  ; 72
               (setq is-closed (cdar remaining) remaining (cdr remaining))  ; 73
@@ -267,7 +274,7 @@
                 (setq vcount (1+ vcount))
               )
               (setq area (mcp-polygon-area vpts))
-              (strcat "{\"type\":\"HATCH\",\"boundaries\":[{\"points\":" (mcp-points-to-json vpts)
+              (strcat prefix "\"boundaries\":[{\"points\":" (mcp-points-to-json vpts)
                       ",\"closed\":" (if (= is-closed 1) "true" "false")
                       ",\"area\":" (rtos area 2 6) "}]"
                       ",\"area\":" (rtos area 2 6) "}")
@@ -975,7 +982,7 @@
         ;; HATCH has its own JSON builder (needs the raw group-code sequence,
         ;; not just assoc lookups) — return it directly.
         ((= etype "HATCH")
-         (setq hatch-json (mcp-hatch-get-json ent-data))
+         (setq hatch-json (mcp-hatch-get-json ent-data handle elayer))
          (cons T hatch-json))
         (t
          (progn

@@ -238,6 +238,7 @@ class TestEntityQuery:
         r = await backend.entity_get(h.dxf.handle)
         assert r.ok
         assert r.payload["type"] == "HATCH"
+        assert r.payload["handle"] == h.dxf.handle
         assert len(r.payload["boundaries"]) == 1
         assert r.payload["boundaries"][0]["area"] == 400.0
         assert r.payload["area"] == 400.0
