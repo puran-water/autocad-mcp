@@ -25,6 +25,30 @@ from autocad_mcp.config import IPC_DIR, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
 
+
+def _redecode_cjk(obj, encoding: str = "big5"):
+    """Recursively fix strings mis-encoded as Latin-1 code-points.
+
+    AutoCAD LISP serialises Chinese characters (Big5 bytes) as individual
+    \\u00xx JSON escapes.  After json.loads() each byte becomes a U+00xx
+    code-point.  We detect such strings (any char in U+0080-U+00FF) and
+    re-encode to raw bytes via latin-1, then decode with the target encoding.
+    Pure ASCII strings pass through unchanged.
+    """
+    if isinstance(obj, str):
+        if any(0x80 <= ord(c) <= 0xFF for c in obj):
+            try:
+                return obj.encode("latin-1").decode(encoding)
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                return obj
+        return obj
+    if isinstance(obj, dict):
+        return {k: _redecode_cjk(v, encoding) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redecode_cjk(i, encoding) for i in obj]
+    return obj
+
+
 # IPC settings
 POLL_INTERVAL = 0.1  # seconds
 TIMEOUT = IPC_TIMEOUT  # seconds (configurable via AUTOCAD_MCP_IPC_TIMEOUT)
@@ -43,7 +67,7 @@ def find_autocad_window() -> int | None:
         def callback(hwnd, result):
             if win32gui.IsWindowVisible(hwnd):
                 text = win32gui.GetWindowText(hwnd).lower()
-                if "autocad" in text and ("drawing" in text or ".dwg" in text):
+                if "autocad" in text and ("drawing" in text or ".dwg" in text or ".dxf" in text):
                     result.append(hwnd)
             return True
 
@@ -165,13 +189,28 @@ class FileIPCBackend(AutoCADBackend):
             while time.time() < deadline:
                 if result_file.exists():
                     try:
-                        # AutoCAD LISP writes files in Windows-1252 encoding;
-                        # try UTF-8 first (covers ASCII), fall back to cp1252
-                        try:
-                            text = result_file.read_text(encoding="utf-8")
-                        except UnicodeDecodeError:
-                            text = result_file.read_text(encoding="cp1252")
+                        # AutoCAD LISP writes files in the system codepage;
+                        # try UTF-8 first (covers ASCII/Unicode),
+                        # then Big5 (Traditional Chinese / Taiwan),
+                        # then GBK (Simplified Chinese / China),
+                        # then fall back to cp1252 / latin-1
+                        raw = result_file.read_bytes()
+                        text = None
+                        for _enc in ("utf-8", "big5", "gbk", "cp1252", "latin-1"):
+                            try:
+                                text = raw.decode(_enc)
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                        if text is None:
+                            text = raw.decode("latin-1")
                         data = json.loads(text)
+                        # Re-decode strings: LISP serialises Big5 bytes as
+                        # \u00xx JSON escapes (one escape per byte), so after
+                        # json.loads() each Chinese char occupies a U+00xx
+                        # code-point.  Encode back to bytes via latin-1 then
+                        # decode as Big5 (Traditional Chinese / Taiwan).
+                        data = _redecode_cjk(data)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
                             return CommandResult(
@@ -194,22 +233,126 @@ class FileIPCBackend(AutoCADBackend):
                     pass
 
     def _find_command_line_hwnd(self) -> int | None:
-        """Find AutoCAD's MDIClient child window for command routing."""
+        """Find AutoCAD's command-line input control for keystroke routing.
+
+        Full (non-LT) AutoCAD hosts the command line in a window with class
+        "AcEdCommandLine", which can be nested several levels deep inside a
+        dockable panel rather than being a direct child of the main frame.
+        AutoCAD LT instead exposes a classic "MDIClient" direct child.
+
+        Search recursively for AcEdCommandLine first (covers full AutoCAD's
+        deeper nesting), then fall back to a direct-child MDIClient search
+        (LT compatibility, and cheaper since it's a single EnumChildWindows
+        call).
+        """
         if sys.platform != "win32" or not self._hwnd:
             return None
         try:
             import win32gui
 
+            # 1) Recursive search for AcEdCommandLine anywhere under the main window
+            found: list[int] = []
+
+            def recurse(hwnd):
+                if found:
+                    return
+                children: list[int] = []
+
+                def cb(child_hwnd, _):
+                    children.append(child_hwnd)
+                    return True
+
+                try:
+                    win32gui.EnumChildWindows(hwnd, cb, None)
+                except Exception:
+                    return
+                for c in children:
+                    try:
+                        if win32gui.GetClassName(c) == "AcEdCommandLine":
+                            found.append(c)
+                            return
+                    except Exception:
+                        continue
+                for c in children:
+                    if found:
+                        return
+                    recurse(c)
+
+            recurse(self._hwnd)
+            if found:
+                return found[0]
+
+            # 2) Fallback: classic MDIClient direct child (AutoCAD LT)
             mdi_client: list[int] = []
 
-            def cb(child_hwnd, _):
+            def cb2(child_hwnd, _):
                 if win32gui.GetClassName(child_hwnd) == "MDIClient":
                     mdi_client.append(child_hwnd)
                     return False  # stop enumeration
                 return True
 
-            win32gui.EnumChildWindows(self._hwnd, cb, None)
-            return mdi_client[0] if mdi_client else None
+            win32gui.EnumChildWindows(self._hwnd, cb2, None)
+            if mdi_client:
+                return mdi_client[0]
+
+            # 3) Last resort: AcEdCommandLine may live in a separate top-level
+            # window (owned, not a true Win32 child) docked visually inside
+            # the main frame. Scan all top-level windows belonging to the
+            # same process and check each one's own descendant tree too.
+            try:
+                import win32process
+
+                _, target_pid = win32process.GetWindowThreadProcessId(self._hwnd)
+
+                global_found: list[int] = []
+
+                def top_level_cb(hwnd, _):
+                    if global_found:
+                        return True
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        if pid != target_pid:
+                            return True
+                        if win32gui.GetClassName(hwnd) == "AcEdCommandLine":
+                            global_found.append(hwnd)
+                            return True
+                    except Exception:
+                        return True
+                    recurse_any(hwnd)
+                    return True
+
+                def recurse_any(hwnd):
+                    if global_found:
+                        return
+                    children: list[int] = []
+
+                    def cb3(child_hwnd, _):
+                        children.append(child_hwnd)
+                        return True
+
+                    try:
+                        win32gui.EnumChildWindows(hwnd, cb3, None)
+                    except Exception:
+                        return
+                    for c in children:
+                        try:
+                            if win32gui.GetClassName(c) == "AcEdCommandLine":
+                                global_found.append(c)
+                                return
+                        except Exception:
+                            continue
+                    for c in children:
+                        if global_found:
+                            return
+                        recurse_any(c)
+
+                win32gui.EnumWindows(top_level_cb, None)
+                if global_found:
+                    return global_found[0]
+            except Exception:
+                pass
+
+            return None
         except Exception:
             return None
 
