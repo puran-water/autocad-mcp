@@ -21,6 +21,57 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
+
+
+# --- Unicode handling for AutoCAD-written files (patched for Vietnamese text) ---
+import re as _re
+
+_ACAD_UNICODE_ESC = _re.compile(r"(?<!\\)\\U\+([0-9A-Fa-f]{4})")
+
+
+def _decode_acad_text(raw: bytes) -> str:
+    """Decode a file written by AutoLISP (open ... "w").
+
+    Order: UTF-8, then the Windows ANSI code page (mbcs), then cp1258 (Vietnamese),
+    then cp1252. Afterwards, AutoCAD's literal \\U+XXXX escapes are turned into
+    the real Unicode characters so the text is valid JSON.
+    """
+    text = None
+    encodings = ["utf-8"]
+    if sys.platform == "win32":
+        encodings.append("mbcs")
+    encodings += ["cp1258", "cp1252"]
+    for enc in encodings:
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        text = raw.decode("latin-1")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return _ACAD_UNICODE_ESC.sub(lambda m: chr(int(m.group(1), 16)), text)
+
+
+def _encode_for_acad(payload: dict) -> str:
+    """Serialize a command for the LISP dispatcher.
+
+    The LISP JSON reader does not decode \\uXXXX escapes, so non-ASCII characters
+    are written as AutoCAD's own \\U+XXXX notation, which AutoCAD understands in
+    text, layer and block names.
+    """
+    text = json.dumps(payload, ensure_ascii=False)
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if cp < 128:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\U+%04X" % cp)
+        else:  # outside BMP: AutoCAD has no notation, drop to '?'
+            out.append("?")
+    return "".join(out)
 from autocad_mcp.config import IPC_DIR, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
@@ -154,7 +205,7 @@ class FileIPCBackend(AutoCADBackend):
                 "params": clean_params,
                 "ts": time.time(),
             }
-            tmp_file.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_file.write_text(_encode_for_acad(payload), encoding="ascii")
             tmp_file.rename(cmd_file)
 
             # Type the fixed dispatch trigger
@@ -165,12 +216,9 @@ class FileIPCBackend(AutoCADBackend):
             while time.time() < deadline:
                 if result_file.exists():
                     try:
-                        # AutoCAD LISP writes files in Windows-1252 encoding;
-                        # try UTF-8 first (covers ASCII), fall back to cp1252
-                        try:
-                            text = result_file.read_text(encoding="utf-8")
-                        except UnicodeDecodeError:
-                            text = result_file.read_text(encoding="cp1252")
+                        # AutoCAD LISP writes files in the system ANSI code page and
+                        # emits non-ANSI characters as literal "\\U+XXXX" sequences.
+                        text = _decode_acad_text(result_file.read_bytes())
                         data = json.loads(text)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
