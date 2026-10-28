@@ -20,6 +20,11 @@ BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
 # IPC timeout (seconds), clamped to [1, 300]
 IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT", "10.0"))))
 
+# How the "(c:mcp-dispatch)" trigger reaches AutoCAD's command line:
+#   copydata — WM_COPYDATA to the main frame (reliable on full AutoCAD 2022+)
+#   wm_char  — WM_CHAR keystrokes to MDIClient (original AutoCAD LT 2024+ method)
+DISPATCH_TRIGGER = os.environ.get("AUTOCAD_MCP_TRIGGER", "copydata").strip().lower()
+
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")
 
@@ -87,7 +92,7 @@ def detect_backend() -> str:
                 elif backend_env == "file_ipc":
                     raise RuntimeError(
                         "AUTOCAD_MCP_BACKEND=file_ipc but no AutoCAD window found. "
-                        "Start AutoCAD LT and open a .dwg file."
+                        "Start AutoCAD (2022+) or AutoCAD LT (2024+) and open a .dwg file."
                     )
             except ImportError:
                 if backend_env == "file_ipc":

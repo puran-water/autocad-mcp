@@ -6,7 +6,7 @@ Two backends, one API:
 
 | Backend | Runtime | Requires AutoCAD? | Screenshot |
 |---------|---------|-------------------|------------|
-| **File IPC** | Windows Python | Yes — AutoCAD LT 2024+ (Windows) | Win32 PrintWindow |
+| **File IPC** | Windows Python | Yes — AutoCAD 2022+ or AutoCAD LT 2024+ (Windows) | Win32 PrintWindow |
 | **ezdxf** | Any platform | No (headless) | matplotlib render |
 
 The server exposes **8 consolidated tools** (`drawing`, `entity`, `layer`, `block`, `annotation`, `pid`, `view`, `system`) over the MCP stdio transport. An MCP client (Claude Desktop, Claude Code, etc.) connects and drives AutoCAD through natural-language requests.
@@ -14,7 +14,7 @@ The server exposes **8 consolidated tools** (`drawing`, `entity`, `layer`, `bloc
 ## Prerequisites (File IPC backend)
 
 - **Windows 10/11** (the File IPC backend uses Win32 APIs for focus-free window messaging)
-- **AutoCAD LT 2024 or newer** — AutoLISP support was added in LT 2024 for Windows. AutoCAD LT for Mac exists but does **not** support AutoLISP.
+- **AutoCAD 2022 or newer** (full AutoCAD, `acad.exe`), **or AutoCAD LT 2024 or newer** — AutoLISP support was added in LT 2024 for Windows. AutoCAD LT for Mac exists but does **not** support AutoLISP.
 - **Python 3.10+** (Windows native — not WSL Python)
 - **uv** package manager ([install guide](https://docs.astral.sh/uv/getting-started/installation/))
 
@@ -40,6 +40,13 @@ Open AutoCAD LT and load `mcp_dispatch.lsp` using **APPLOAD**:
 4. You should see: `=== MCP Dispatch v3.1 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
 
 > **Tip:** Add the file to your AutoCAD Startup Suite (in the APPLOAD dialog) so it loads automatically with every drawing.
+
+#### AutoCAD 2022 notes
+
+- **Trusted Locations:** AutoCAD 2022 blocks `load` of LISP files outside trusted paths (SECURELOAD). In **OPTIONS → Files → Trusted Locations**, add `<repo>\lisp-code` and the IPC directory (`C:\temp` by default). Without the IPC directory, `system(operation="execute_lisp")` fails with "File load canceled".
+- **Per-document LISP:** each open drawing has its own LISP namespace. Use the Startup Suite so the dispatcher is loaded in every drawing (including ones opened via `drawing(operation="open")`).
+- **Trigger:** on full AutoCAD the `(c:mcp-dispatch)` trigger is sent with `WM_COPYDATA` to the main window (default, `AUTOCAD_MCP_TRIGGER=copydata`). If a command never reaches the command line, try `AUTOCAD_MCP_TRIGGER=wm_char` (the original LT keystroke method).
+- Keep `LISPSYS=1` (default since 2021) — the dispatcher reads/writes IPC files as UTF-8, so Unicode text (e.g. Vietnamese) round-trips correctly.
 
 ### 3. Configure your MCP client
 
@@ -181,6 +188,7 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 | `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
 | `AUTOCAD_MCP_IPC_TIMEOUT` | `10.0` | IPC command timeout in seconds (1-300) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
+| `AUTOCAD_MCP_TRIGGER` | `copydata` | How the dispatch trigger reaches AutoCAD: `copydata` (WM_COPYDATA, full AutoCAD 2022+) or `wm_char` (keystrokes to MDIClient, LT 2024+) |
 
 > **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
 

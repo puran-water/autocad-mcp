@@ -1,8 +1,9 @@
-"""File-based IPC backend for AutoCAD LT.
+"""File-based IPC backend for AutoCAD 2022+ (full) and AutoCAD LT 2024+.
 
 Protocol:
 1. Python writes JSON command to C:/temp/autocad_mcp_cmd_{request_id}.json
-2. Python types the fixed string "(c:mcp-dispatch)" + Enter
+2. Python sends the fixed string "(c:mcp-dispatch)" + Enter to the command line
+   (WM_COPYDATA by default, or WM_CHAR keystrokes — see AUTOCAD_MCP_TRIGGER)
 3. LISP reads cmd, dispatches via command map, writes result to
    C:/temp/autocad_mcp_result_{request_id}.json
 4. Python polls for result file (100ms intervals, 10s timeout)
@@ -21,7 +22,7 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
-from autocad_mcp.config import IPC_DIR, IPC_TIMEOUT, LISP_DIR
+from autocad_mcp.config import DISPATCH_TRIGGER, IPC_DIR, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
 
@@ -30,9 +31,43 @@ POLL_INTERVAL = 0.1  # seconds
 TIMEOUT = IPC_TIMEOUT  # seconds (configurable via AUTOCAD_MCP_IPC_TIMEOUT)
 STALE_THRESHOLD = 60.0  # clean up files older than this
 
+# Executables of AutoCAD 2022 (full) and AutoCAD LT
+AUTOCAD_EXES = ("acad.exe", "acadlt.exe")
+
+
+def _process_exe_name(hwnd: int) -> str | None:
+    """Return the lowercase executable name owning hwnd, or None if unavailable."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return None
+            return os.path.basename(buf.value).lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
 
 def find_autocad_window() -> int | None:
-    """Find the AutoCAD LT window handle by checking window titles."""
+    """Find the main window of AutoCAD (acad.exe / acadlt.exe) with a drawing open.
+
+    Matching by process avoids picking up other windows whose title merely
+    mentions AutoCAD or a .dwg file (Explorer, editors, browsers).
+    """
     if sys.platform != "win32":
         return None
     try:
@@ -43,8 +78,13 @@ def find_autocad_window() -> int | None:
         def callback(hwnd, result):
             if win32gui.IsWindowVisible(hwnd):
                 text = win32gui.GetWindowText(hwnd).lower()
-                if "autocad" in text and ("drawing" in text or ".dwg" in text):
-                    result.append(hwnd)
+                if "drawing" in text or ".dwg" in text:
+                    exe = _process_exe_name(hwnd)
+                    if exe in AUTOCAD_EXES:
+                        result.append(hwnd)
+                    elif exe is None and "autocad" in text:
+                        # Process not inspectable — fall back to title match
+                        result.append(hwnd)
             return True
 
         win32gui.EnumWindows(callback, windows)
@@ -54,7 +94,7 @@ def find_autocad_window() -> int | None:
 
 
 class FileIPCBackend(AutoCADBackend):
-    """File-based IPC with AutoCAD LT via mcp_dispatch.lsp."""
+    """File-based IPC with AutoCAD / AutoCAD LT via mcp_dispatch.lsp."""
 
     def __init__(self):
         self._hwnd: int | None = None
@@ -86,7 +126,7 @@ class FileIPCBackend(AutoCADBackend):
         """Find AutoCAD window and verify dispatcher is loaded."""
         self._hwnd = find_autocad_window()
         if not self._hwnd:
-            return CommandResult(ok=False, error="AutoCAD LT window not found")
+            return CommandResult(ok=False, error="AutoCAD window not found")
 
         # Set up screenshot provider
         try:
@@ -113,9 +153,13 @@ class FileIPCBackend(AutoCADBackend):
             return CommandResult(
                 ok=False,
                 error=(
-                    "AutoCAD LT detected but mcp_dispatch.lsp not loaded.\n"
+                    "AutoCAD detected but mcp_dispatch.lsp not loaded (or the trigger did not reach "
+                    "the command line).\n"
                     f'In AutoCAD command line, type:\n  (load "{lisp_path}")\n'
-                    "Or add lisp-code/ to trusted paths for auto-loading."
+                    "Add lisp-code/ and the IPC directory to Options > Files > Trusted Locations, "
+                    "and add mcp_dispatch.lsp to the APPLOAD Startup Suite so every drawing loads it.\n"
+                    f"Current trigger: {DISPATCH_TRIGGER} (set AUTOCAD_MCP_TRIGGER=wm_char to try the "
+                    "keystroke method)."
                 ),
             )
 
@@ -126,6 +170,8 @@ class FileIPCBackend(AutoCADBackend):
             "backend": "file_ipc",
             "hwnd": self._hwnd,
             "ipc_dir": str(self._ipc_dir),
+            "trigger": DISPATCH_TRIGGER,
+            "process": _process_exe_name(self._hwnd) if self._hwnd else None,
             "capabilities": {k: v for k, v in self.capabilities.__dict__.items()},
         }
         return CommandResult(ok=True, payload=info)
@@ -154,7 +200,9 @@ class FileIPCBackend(AutoCADBackend):
                 "params": clean_params,
                 "ts": time.time(),
             }
-            tmp_file.write_text(json.dumps(payload), encoding="utf-8")
+            # ensure_ascii=False keeps non-ASCII text (e.g. Vietnamese) as real UTF-8,
+            # since the LISP JSON reader does not decode \uXXXX escapes
+            tmp_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             tmp_file.rename(cmd_file)
 
             # Type the fixed dispatch trigger
@@ -214,7 +262,7 @@ class FileIPCBackend(AutoCADBackend):
             return None
 
     def _type_dispatch_trigger(self):
-        """Post '(c:mcp-dispatch)' + Enter via WM_CHAR to MDIClient — no focus steal.
+        """Send '(c:mcp-dispatch)' + Enter to AutoCAD's command line — no focus steal.
 
         Sends ESC keystrokes first to cancel any stale pending command
         (e.g. from a previous timeout leaving AutoCAD in a command prompt).
@@ -222,7 +270,6 @@ class FileIPCBackend(AutoCADBackend):
         try:
             import ctypes
 
-            WM_CHAR = 0x0102
             WM_KEYDOWN = 0x0100
             WM_KEYUP = 0x0101
             VK_ESCAPE = 0x1B
@@ -235,13 +282,52 @@ class FileIPCBackend(AutoCADBackend):
                 post(target, WM_KEYUP, VK_ESCAPE, 0)
             time.sleep(0.05)
 
-            for ch in "(c:mcp-dispatch)":
-                post(target, WM_CHAR, ord(ch), 0)
-            # Enter = carriage return
-            post(target, WM_CHAR, 0x0D, 0)
+            if DISPATCH_TRIGGER == "wm_char" or not self._send_copydata("(c:mcp-dispatch)\n"):
+                self._post_chars(target, "(c:mcp-dispatch)")
             time.sleep(0.05)
         except Exception as e:
             log.error("dispatch_trigger_failed", error=str(e))
+
+    def _send_copydata(self, text: str) -> bool:
+        """Send text to the main AutoCAD frame via WM_COPYDATA (dwData=1).
+
+        AutoCAD (full, 2022+) feeds the string to the command line as if typed.
+        Returns False if the message could not be delivered.
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        class COPYDATASTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("dwData", ctypes.c_size_t),
+                ("cbData", wintypes.DWORD),
+                ("lpData", ctypes.c_void_p),
+            ]
+
+        WM_COPYDATA = 0x004A
+        SMTO_ABORTIFHUNG = 0x0002
+        buf = ctypes.create_unicode_buffer(text)
+        cds = COPYDATASTRUCT(1, ctypes.sizeof(buf), ctypes.cast(buf, ctypes.c_void_p))
+        result = ctypes.c_size_t()
+        ok = ctypes.windll.user32.SendMessageTimeoutW(
+            wintypes.HWND(self._hwnd), WM_COPYDATA, 0, ctypes.byref(cds),
+            SMTO_ABORTIFHUNG, 2000, ctypes.byref(result),
+        )
+        if not ok:
+            log.warning("copydata_trigger_failed_fallback_wm_char")
+        return bool(ok)
+
+    @staticmethod
+    def _post_chars(target: int, text: str):
+        """Post text + Enter as WM_CHAR messages (AutoCAD LT 2024+ method)."""
+        import ctypes
+
+        WM_CHAR = 0x0102
+        post = ctypes.windll.user32.PostMessageW
+        for ch in text:
+            post(target, WM_CHAR, ord(ch), 0)
+        # Enter = carriage return
+        post(target, WM_CHAR, 0x0D, 0)
 
     def _cleanup_stale_files(self):
         """Remove stale IPC files from previous sessions."""

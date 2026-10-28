@@ -7,7 +7,9 @@
 ;;;   4. Python polls for C:/temp/autocad_mcp_result_{id}.json
 ;;;
 ;;; SECURITY: No raw eval — dispatcher uses a command whitelist/map.
-;;; Compatible with AutoCAD LT 2024+.
+;;; Compatible with AutoCAD 2022+ (full) and AutoCAD LT 2024+.
+;;; Requires AutoLISP Unicode mode (LISPSYS=1, the default since 2021) for
+;;; UTF-8 file I/O.
 
 ;; Load dependencies
 (if (not report-error)
@@ -24,7 +26,7 @@
 (defun mcp-write-result (filepath request-id ok-flag payload error-msg / fp)
   "Write a result JSON file. Atomic: write to .tmp then rename."
   (setq tmp-path (strcat filepath ".tmp"))
-  (setq fp (open tmp-path "w"))
+  (setq fp (open tmp-path "w" "utf8"))
   (if fp
     (progn
       (write-line "{" fp)
@@ -66,7 +68,7 @@
 
 (defun mcp-read-file-lines (filepath / fp line lines)
   "Read all lines from a file into a single string."
-  (setq fp (open filepath "r"))
+  (setq fp (open filepath "r" "utf8"))
   (if (not fp) (progn (princ (strcat "\nMCP: Cannot read: " filepath)) nil)
     (progn
       (setq lines "")
@@ -304,7 +306,11 @@
        (if (and path (> (strlen path) 0))
          (progn
            (setvar "FILEDIA" 0)
-           (command "_.SAVEAS" "" path)
+           ;; Explicit DWG 2018 format: the default ("") would keep DXF after a
+           ;; previous save-as-dxf. Answer "replace?" when the target exists.
+           (if (findfile path)
+             (command "_.SAVEAS" "2018" path "_Y")
+             (command "_.SAVEAS" "2018" path))
            (setvar "FILEDIA" 1)
            (cons T (strcat "\"saved to: " (mcp-escape-string path) "\"")))
          (progn (command "_.QSAVE") (cons T "\"saved\"")))))
@@ -313,7 +319,14 @@
      (progn
        (setq path (mcp-json-get-string params-json "path"))
        (if path
-         (progn (command "_.SAVEAS" "DXF" path) (cons T (strcat "\"" path "\"")))
+         (progn
+           (setvar "FILEDIA" 0)
+           ;; "" accepts the default DXF precision prompt (asked before the file name)
+           (if (findfile path)
+             (command "_.SAVEAS" "_DXF" "" path "_Y")
+             (command "_.SAVEAS" "_DXF" "" path))
+           (setvar "FILEDIA" 1)
+           (cons T (strcat "\"" (mcp-escape-string path) "\"")))
          (cons nil "Save path required"))))
 
     ((= cmd-name "drawing-purge")
@@ -548,7 +561,7 @@
   (if layer
     (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer))
   )
-  (command "_TEXT" "J" "M" (list x y 0.0) height rotation text)
+  (command "_TEXT" "_J" "_M" (list x y 0.0) height rotation text)
   (cons T (strcat "{\"entity_type\":\"TEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
@@ -625,13 +638,17 @@
     (if (not (findfile code-file))
       (cons nil (strcat "Code file not found: " code-file))
       (progn
-        ;; Suppress SECURELOAD dialog for MCP temp files
+        ;; Suppress SECURELOAD dialog for MCP temp files. Some AutoCAD builds
+        ;; refuse this setvar, so it must not abort the command.
         (setq old-secureload (getvar "SECURELOAD"))
-        (setvar "SECURELOAD" 0)
+        (vl-catch-all-apply 'setvar (list "SECURELOAD" 0))
         (setq result (vl-catch-all-apply 'load (list code-file)))
-        (setvar "SECURELOAD" old-secureload)
+        (vl-catch-all-apply 'setvar (list "SECURELOAD" old-secureload))
         (if (vl-catch-all-error-p result)
-          (cons nil (strcat "LISP error: " (vl-catch-all-error-message result)))
+          (cons nil (strcat "LISP error: " (vl-catch-all-error-message result)
+                            (if (wcmatch (strcase (vl-catch-all-error-message result)) "*CANCEL*")
+                              " (add the IPC directory to Options > Files > Trusted Locations)"
+                              "")))
           (cons T (strcat "\"" (mcp-escape-string (vl-princ-to-string result)) "\""))
         )
       )
@@ -786,7 +803,7 @@
 
 ;; --- Additional entity creation ---
 
-(defun mcp-cmd-create-arc (params / cx cy radius sa ea layer)
+(defun mcp-cmd-create-arc (params / cx cy radius sa ea layer sa-rad incl)
   (setq cx (mcp-json-get-number params "cx"))
   (setq cy (mcp-json-get-number params "cy"))
   (setq radius (mcp-json-get-number params "radius"))
@@ -794,7 +811,14 @@
   (setq ea (mcp-json-get-number params "end_angle"))
   (setq layer (mcp-json-get-string params "layer"))
   (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
-  (command "_ARC" "_C" (list cx cy 0.0) (list (+ cx radius) cy 0.0) "_A" (- ea sa))
+  ;; Start point lies at start_angle; included angle is CCW from start to end
+  (setq sa-rad (* sa (/ pi 180.0)))
+  (setq incl (- ea sa))
+  (while (<= incl 0.0) (setq incl (+ incl 360.0)))
+  (while (> incl 360.0) (setq incl (- incl 360.0)))
+  (command "_ARC" "_C" (list cx cy 0.0)
+           (list (+ cx (* radius (cos sa-rad))) (+ cy (* radius (sin sa-rad))) 0.0)
+           "_A" incl)
   (cons T (strcat "{\"entity_type\":\"ARC\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
@@ -806,7 +830,10 @@
   (setq ratio (mcp-json-get-number params "ratio"))
   (setq layer (mcp-json-get-string params "layer"))
   (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
-  (command "_ELLIPSE" "_C" (list cx cy 0.0) (list mx my 0.0) ratio)
+  ;; (major_x, major_y) is the major-axis endpoint; the prompt after it asks for
+  ;; the half-length of the other axis, not the ratio
+  (command "_ELLIPSE" "_C" (list cx cy 0.0) (list mx my 0.0)
+           (* ratio (distance (list cx cy) (list mx my))))
   (cons T (strcat "{\"entity_type\":\"ELLIPSE\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
@@ -823,7 +850,7 @@
   (cons T (strcat "{\"entity_type\":\"MTEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-hatch (params / entity-id pattern ent)
+(defun mcp-cmd-create-hatch (params / entity-id pattern ent before)
   (setq entity-id (mcp-json-get-string params "entity_id"))
   (setq pattern (mcp-json-get-string params "pattern"))
   (if (not pattern) (setq pattern "ANSI31"))
@@ -833,8 +860,15 @@
   )
   (if ent
     (progn
-      (command "_HATCH" "_P" pattern "" "_S" ent "" "")
-      (cons T (strcat "{\"entity_type\":\"HATCH\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}")))
+      (setq before (entlast))
+      ;; -HATCH: Properties -> pattern [-> scale -> angle] -> Select objects -> finish.
+      ;; SOLID has no scale/angle prompts.
+      (if (= (strcase pattern) "SOLID")
+        (command "_.-HATCH" "_P" "_S" "_S" ent "" "")
+        (command "_.-HATCH" "_P" pattern "" "" "_S" ent "" ""))
+      (if (equal before (entlast))
+        (cons nil "Hatch not created (boundary must be a closed object)")
+        (cons T (strcat "{\"entity_type\":\"HATCH\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))))
     (cons nil "Entity not found for hatching")
   )
 )
@@ -948,11 +982,16 @@
   (setq row-dist (mcp-json-get-number params "row_dist"))
   (setq col-dist (mcp-json-get-number params "col_dist"))
   (if (= entity-id "last") (setq ent (entlast)) (setq ent (handent entity-id)))
-  (if ent
-    (progn
-      (command "_.ARRAY" ent "" "_R" rows cols row-dist col-dist)
-      (cons T (strcat "{\"rows\":" (itoa rows) ",\"cols\":" (itoa cols) "}")))
-    (cons nil "Entity not found")
+  (cond
+    ((not ent) (cons nil "Entity not found"))
+    ((and (<= rows 1) (<= cols 1)) (cons nil "rows or cols must be greater than 1"))
+    (t
+     ;; Legacy -ARRAY (ARRAY is associative/grip-based since 2012).
+     ;; Row distance is only asked when rows > 1, column distance when cols > 1.
+     (command "_.-ARRAY" ent "" "_R" rows cols)
+     (if (> rows 1) (command row-dist))
+     (if (> cols 1) (command col-dist))
+     (cons T (strcat "{\"rows\":" (itoa rows) ",\"cols\":" (itoa cols) "}")))
   )
 )
 
@@ -1026,7 +1065,18 @@
 
 ;; --- Block operations (insert-with-attributes, get-attributes, update-attribute) ---
 
-(defun mcp-cmd-block-insert-with-attribs (params / name x y scale rotation attributes ent)
+(defun mcp-insert-block (name x y scale rotation / old-attreq)
+  "Insert a block without any attribute or scale prompts. Returns the INSERT ename."
+  (setq old-attreq (getvar "ATTREQ"))
+  (setvar "ATTREQ" 0)
+  ;; Preset scale/rotation before the point so no further prompts follow
+  ;; (works for both uniform-scale and free-scale blocks)
+  (command "_.-INSERT" name "_S" scale "_R" rotation (list x y 0.0))
+  (setvar "ATTREQ" old-attreq)
+  (entlast)
+)
+
+(defun mcp-cmd-block-insert-with-attribs (params / name x y scale rotation attr-pos attr-json ent sub-ent ent-data val)
   (setq name (mcp-json-get-string params "name"))
   (setq x (mcp-json-get-number params "x"))
   (setq y (mcp-json-get-number params "y"))
@@ -1036,10 +1086,27 @@
   (if (not rotation) (setq rotation 0.0))
   (if (tblsearch "BLOCK" name)
     (progn
-      ;; Insert with ATTREQ=1 to fill attributes
-      (command "_.INSERT" name (list x y 0.0) scale scale rotation)
-      ;; Note: attribute values are applied separately via update-attribute
-      (cons T (strcat "{\"entity_type\":\"INSERT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}")))
+      (setq ent (mcp-insert-block name x y scale rotation))
+      ;; Fill attributes from the "attributes" object ({"TAG": "value", ...})
+      (if (setq attr-pos (vl-string-search "\"attributes\"" params))
+        (progn
+          (setq attr-json (substr params (+ attr-pos 1)))
+          (setq sub-ent (entnext ent))
+          (while sub-ent
+            (setq ent-data (entget sub-ent))
+            (cond
+              ((= (cdr (assoc 0 ent-data)) "ATTRIB")
+               (if (setq val (mcp-json-get-string attr-json (cdr (assoc 2 ent-data))))
+                 (progn
+                   (entmod (subst (cons 1 val) (assoc 1 ent-data) ent-data))
+                   (entupd sub-ent)))
+               (setq sub-ent (entnext sub-ent)))
+              (t (setq sub-ent nil))
+            )
+          )
+        )
+      )
+      (cons T (strcat "{\"entity_type\":\"INSERT\",\"handle\":\"" (cdr (assoc 5 (entget ent))) "\"}")))
     (cons nil (strcat "Block '" name "' not found"))
   )
 )
@@ -1121,7 +1188,9 @@
   (setq y1 (mcp-json-get-number params "y1"))
   (setq x2 (mcp-json-get-number params "x2"))
   (setq y2 (mcp-json-get-number params "y2"))
-  (command "_.DIMANGULAR" (list cx cy 0) (list x1 y1 0) (list x2 y2 0) "")
+  ;; "" = <specify vertex>; arc location at the midpoint between the two points
+  (command "_.DIMANGULAR" "" (list cx cy 0) (list x1 y1 0) (list x2 y2 0)
+           (list (/ (+ x1 x2) 2.0) (/ (+ y1 y2) 2.0) 0))
   (cons T "{\"entity_type\":\"DIMENSION\"}")
 )
 
@@ -1133,7 +1202,7 @@
   ;; Need a circle/arc entity first, use entity at center
   (setq px (+ cx (* radius (cos (* angle (/ pi 180.0))))))
   (setq py (+ cy (* radius (sin (* angle (/ pi 180.0))))))
-  (command "_.DIMRADIUS" (list px py 0) "")
+  (command "_.DIMRADIUS" (list px py 0) (list px py 0))
   (cons T "{\"entity_type\":\"DIMENSION\"}")
 )
 
@@ -1197,14 +1266,31 @@
   )
 )
 
-(defun mcp-cmd-drawing-plot-pdf (params / path)
+(defun mcp-cmd-drawing-plot-pdf (params / path old-bgplot)
   (setq path (mcp-json-get-string params "path"))
   (if path
     (progn
+      (if (findfile path) (vl-file-delete path))
+      ;; Plot in the foreground so the PDF exists when the result is written
+      (setq old-bgplot (getvar "BACKGROUNDPLOT"))
+      (setvar "BACKGROUNDPLOT" 0)
+      ;; AutoCAD 2022 -PLOT detailed prompts:
+      ;; layout, device, paper, units, orientation, upside-down, area, scale,
+      ;; offset, plot styles?, style table, lineweights?, then model/layout specific
       (command "_.-PLOT" "_Y" "" "DWG To PDF.pc3"
         "ANSI_A_(8.50_x_11.00_Inches)" "_Inches" "_Landscape"
-        "_N" "_Extents" "_Fit" "_Y" "acad.ctb" "_Y" "_N" "_Y" path "_Y")
-      (cons T (strcat "{\"path\":\"" (mcp-escape-string path) "\"}")))
+        "_N" "_Extents" "_Fit" "_C" "_Y" "acad.ctb" "_Y")
+      (if (= (getvar "TILEMODE") 1)
+        ;; Model: shade plot setting
+        (command "_As")
+        ;; Layout: scale lineweights? / paper space first? / hide paperspace objects?
+        (command "_N" "_N" "_N"))
+      ;; File name, save page setup changes?, proceed?
+      (command path "_N" "_Y")
+      (setvar "BACKGROUNDPLOT" old-bgplot)
+      (if (findfile path)
+        (cons T (strcat "{\"path\":\"" (mcp-escape-string path) "\"}"))
+        (cons nil (strcat "PDF not created: " path))))
     (cons nil "Plot path required")
   )
 )
@@ -1255,7 +1341,7 @@
   (if (not rotation) (setq rotation 0.0))
   (if (tblsearch "BLOCK" name)
     (progn
-      (command "_.INSERT" name (list x y 0.0) scale scale rotation)
+      (mcp-insert-block name x y scale rotation)
       (if (and block-id (> (strlen block-id) 0))
         (set_attribute_value (entlast) "ID" block-id)
       )
@@ -1269,7 +1355,7 @@
 ;; Main dispatcher — called by "(c:mcp-dispatch)" from Python
 ;; -----------------------------------------------------------------------
 
-(defun c:mcp-dispatch ( / cmd-files cmd-file json-text request-id cmd-name params-str result result-file)
+(defun c:mcp-dispatch ( / cmd-files cmd-file json-text request-id cmd-name params-str result result-file old-osmode)
   "Find pending command file, dispatch, write result."
   ;; Find first pending command file
   (setq cmd-files (vl-directory-files *mcp-ipc-dir* "autocad_mcp_cmd_*.json" 1))
@@ -1292,6 +1378,11 @@
             (progn
               (princ (strcat "\nMCP: Dispatching " cmd-name " [" request-id "]"))
 
+              ;; Suspend running object snaps so (command) points are not
+              ;; snapped to nearby geometry (bit 16384 keeps the user's modes)
+              (setq old-osmode (getvar "OSMODE"))
+              (setvar "OSMODE" (logior old-osmode 16384))
+
               ;; Execute via whitelist dispatcher
               (setq result
                 (vl-catch-all-apply
@@ -1299,6 +1390,8 @@
                   (list cmd-name json-text)
                 )
               )
+
+              (setvar "OSMODE" old-osmode)
 
               ;; Handle error from vl-catch-all-apply
               (if (vl-catch-all-error-p result)
