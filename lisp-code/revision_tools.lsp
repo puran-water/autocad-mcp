@@ -147,7 +147,10 @@
       (if (= kind "patch")
         (foreach p (pcad:g "set" op)
           (pcad:require (not (and (= (car p) 1) (= (cdr (assoc 0 d)) "MTEXT"))) "USE_TEXT_OPERATION_FOR_MTEXT")
-          (pcad:require (member (car p) '(1 2 7 8 10 11 40 41 42 43 50 62)) "DXF_FIELD_NOT_EDITABLE")
+          (pcad:require (member (car p) '(1 2 7 8 10 11 40 41 42 43 50 62 370)) "DXF_FIELD_NOT_EDITABLE")
+          (if (= (car p) 370)
+            (pcad:require (and (= (type (cdr p)) 'INT)
+              (member (cdr p) '(-3 -2 -1 0 5 9 13 15 18 20 25 30 35 40 50 53 60 70 80 90 100 106 120 140 158 200 211))) "INVALID_DXF_LINEWEIGHT"))
           (pcad:require (assoc (car p) (pcad:g "expect" op)) "EXPECTED_FIELD_REQUIRED")))
       (if (= kind "scale") (progn
         (pcad:require (= (cdr (assoc 0 d)) "INSERT") "INSERT_REQUIRED")

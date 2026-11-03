@@ -174,6 +174,38 @@ def normalize_ops(ops):
         if op.get("kind") == "patch":
             if not set(op.get("set", {})) <= set(op.get("expect", {})):
                 raise RevisionError("EXPECTED_FIELD_REQUIRED")
+            if 370 in op.get("set", {}):
+                weight = op["set"][370]
+                if type(weight) is not int or weight not in {
+                    -3,
+                    -2,
+                    -1,
+                    0,
+                    5,
+                    9,
+                    13,
+                    15,
+                    18,
+                    20,
+                    25,
+                    30,
+                    35,
+                    40,
+                    50,
+                    53,
+                    60,
+                    70,
+                    80,
+                    90,
+                    100,
+                    106,
+                    120,
+                    140,
+                    158,
+                    200,
+                    211,
+                }:
+                    raise RevisionError("INVALID_DXF_LINEWEIGHT")
             if 1 in op.get("set", {}) and op["expect"].get(0) == "MTEXT":
                 # Long MTEXT needs its group-3 chunks handled as a whole, never partial.
                 if op["expect"].get(0) == "MTEXT":

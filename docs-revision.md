@@ -17,6 +17,9 @@ Supported kinds:
 
 - `text`: `expected_text`, `text`; works on TEXT, MTEXT and ATTRIB, including long MTEXT.
 - `patch`: `set` DXF fields, every field present in `expect`; use `text` for MTEXT content.
+  DXF 370 supports standard lineweights in hundredths of a millimetre, including
+  ByLayer (-1), ByBlock (-2) and Default (-3). Invalid weights are refused in both
+  Python and LISP. Preserve effective plotted appearance when moving between layers.
 - `scale`: absolute positive `target`; expected XYZ scales, uniform absolute scale only.
 - `move`, `copy`: explicit `delta`; `erase`: captures original bounds in the journal.
 - `line`: `space`, `layer`, `start`, `end`; `polyline`: `space`, `layer`, `points`, `closed`.
