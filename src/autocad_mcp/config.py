@@ -18,7 +18,13 @@ IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR", "C:/temp"))
 BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
 
 # IPC timeout (seconds), clamped to [1, 300]
-IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT", "10.0"))))
+IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT", "30.0"))))
+# Long-running operations (execute_lisp, plot) get at least this much time
+IPC_LONG_TIMEOUT = max(IPC_TIMEOUT, min(600.0, float(os.environ.get("AUTOCAD_MCP_IPC_LONG_TIMEOUT", "120.0"))))
+
+# Load mcp_dispatch.lsp into the active drawing automatically when it does not answer
+# (it is per-document: switching drawing tabs leaves the new one without it)
+AUTOLOAD_DISPATCHER = os.environ.get("AUTOCAD_MCP_AUTOLOAD", "1").lower() not in ("0", "false", "no")
 
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")

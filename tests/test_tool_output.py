@@ -42,5 +42,5 @@ async def test_result_with_raw_newline_is_parsed(tmp_path: Path):
 def test_lisp_escapes_control_characters():
     """Smoke check only: AutoLISP cannot run offline, so verify the escape branches exist."""
     lisp = (LISP_DIR / "mcp_dispatch.lsp").read_text(encoding="utf-8")
-    for needle in ('((= ch "\\n")', '((= ch "\\r")', '((= ch "\\t")'):
+    for needle in ('((= c 10)', '((= c 13)', '((= c 9)'):
         assert needle in lisp

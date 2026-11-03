@@ -179,7 +179,9 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 |----------|---------|-------------|
 | `AUTOCAD_MCP_BACKEND` | `auto` | Backend selection: `auto`, `file_ipc`, `ezdxf` |
 | `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
-| `AUTOCAD_MCP_IPC_TIMEOUT` | `10.0` | IPC command timeout in seconds (1-300) |
+| `AUTOCAD_MCP_IPC_TIMEOUT` | `30.0` | IPC command timeout in seconds (1-300) |
+| `AUTOCAD_MCP_IPC_LONG_TIMEOUT` | `120.0` | Timeout for `execute_lisp` and plotting (up to 600) |
+| `AUTOCAD_MCP_AUTOLOAD` | `1` | Load `mcp_dispatch.lsp` into the active drawing when it does not answer (`0` to disable) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
 
 > **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
@@ -216,7 +218,8 @@ The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
 - **Polyline/leader fix** — Point arrays properly encoded via semicolon-delimited format.
 - **ESC prefix** — Sends 2x ESC before each dispatch to cancel stale pending commands from prior timeouts.
 - **UTF-8/cp1252 fallback** — Handles non-ASCII characters in LISP result files (AutoCAD writes Windows-1252).
-- **Configurable IPC timeout** — `AUTOCAD_MCP_IPC_TIMEOUT` env var (1–300 seconds, default 10).
+- **Configurable IPC timeout** — `AUTOCAD_MCP_IPC_TIMEOUT` env var (1–300 seconds, default 30); `execute_lisp` and plotting use `AUTOCAD_MCP_IPC_LONG_TIMEOUT` (default 120).
+- **Dispatcher autoload** — `mcp_dispatch.lsp` is loaded per drawing. When a command is not picked up within 3 s (new drawing tab, dispatcher never loaded), the server loads it into the active drawing and runs that same command; a command that was picked up is never re-sent. Disable with `AUTOCAD_MCP_AUTOLOAD=0`.
 - **Thread-safe backend init** — `asyncio.Lock` prevents parallel initialization races.
 
 ## License

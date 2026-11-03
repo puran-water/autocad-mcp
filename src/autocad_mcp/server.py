@@ -8,6 +8,7 @@ from __future__ import annotations
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+from autocad_mcp import __version__
 from autocad_mcp.client import (
     _json,
     _safe,
@@ -108,7 +109,7 @@ async def entity(
       create_arc        — data: {cx, cy, radius, start_angle, end_angle}, layer?
       create_ellipse    — data: {cx, cy, major_x, major_y, ratio}, layer?
       create_mtext      — data: {x, y, width, text, height?}, layer?
-      create_hatch      — entity_id, data: {pattern?}
+      create_hatch      — entity_id, data: {pattern?, scale?, angle?}  (pattern SOLID for a fill)
 
     Read operations:
       list              — layer? → list entities
@@ -146,7 +147,7 @@ async def entity(
     elif operation == "create_mtext":
         result = await backend.create_mtext(data["x"], data["y"], data["width"], data["text"], data.get("height", 2.5), layer)
     elif operation == "create_hatch":
-        result = await backend.create_hatch(entity_id, data.get("pattern", "ANSI31"))
+        result = await backend.create_hatch(entity_id, data.get("pattern", "ANSI31"), data.get("scale", 1.0), data.get("angle", 0.0))
     # --- Read ---
     elif operation == "list":
         result = await backend.entity_list(layer)
@@ -422,12 +423,13 @@ async def view(
     y1: float | None = None,
     x2: float | None = None,
     y2: float | None = None,
+    data: dict | None = None,
 ) -> ToolResult:
     """Viewport control and screenshot capture.
 
     Operations:
       zoom_extents   — Zoom to show all entities.
-      zoom_window    — Zoom to window: x1, y1, x2, y2
+      zoom_window    — Zoom to window: x1, y1, x2, y2 (top-level or inside data)
       get_screenshot — Capture current view as PNG image.
     """
     backend = await get_backend()
@@ -436,6 +438,12 @@ async def view(
         result = await backend.zoom_extents()
         return _json(result.to_dict())
     elif operation == "zoom_window":
+        # Other tools take their arguments in `data`; accept that shape here too
+        d = data or {}
+        x1, y1, x2, y2 = (v if v is not None else d.get(k) for k, v in
+                          (("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)))
+        if None in (x1, y1, x2, y2):
+            return _json({"ok": False, "error": "zoom_window needs x1, y1, x2, y2"})
         result = await backend.zoom_window(x1, y1, x2, y2)
         return _json(result.to_dict())
     elif operation == "get_screenshot":
@@ -545,5 +553,5 @@ def main():
         ],
     )
 
-    log.info("autocad_mcp_starting", version="3.1.0")
+    log.info("autocad_mcp_starting", version=__version__)
     mcp.run(transport="stdio")

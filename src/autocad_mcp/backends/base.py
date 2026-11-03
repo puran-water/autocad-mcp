@@ -123,7 +123,7 @@ class AutoCADBackend(ABC):
     async def create_mtext(self, x: float, y: float, width: float, text: str, height: float = 2.5, layer: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
-    async def create_hatch(self, entity_id: str, pattern: str = "ANSI31") -> CommandResult:
+    async def create_hatch(self, entity_id: str, pattern: str = "ANSI31", scale: float = 1.0, angle: float = 0.0) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def entity_list(self, layer: str | None = None) -> CommandResult:

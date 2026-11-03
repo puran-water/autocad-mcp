@@ -339,13 +339,16 @@ class EzdxfBackend(AutoCADBackend):
     async def entity_chamfer(self, entity_id1, entity_id2, dist1, dist2) -> CommandResult:
         return CommandResult(ok=False, error="Chamfer not supported on ezdxf backend")
 
-    async def create_hatch(self, entity_id, pattern="ANSI31") -> CommandResult:
+    async def create_hatch(self, entity_id, pattern="ANSI31", scale=1.0, angle=0.0) -> CommandResult:
         try:
             e = self._doc.entitydb.get(entity_id)
             if e is None:
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
             hatch = self._msp.add_hatch()
-            hatch.set_pattern_fill(pattern, scale=1.0)
+            if pattern.upper() == "SOLID":
+                hatch.set_solid_fill()
+            else:
+                hatch.set_pattern_fill(pattern, scale=scale, angle=angle)
             # Try to use the entity as a boundary path
             hatch.paths.add_polyline_path(
                 [(p[0], p[1]) for p in e.get_points(format="xy")],

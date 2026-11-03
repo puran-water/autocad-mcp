@@ -1,4 +1,4 @@
-;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.1
+;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2
 ;;;
 ;;; Protocol:
 ;;;   1. Python writes command JSON to C:/temp/autocad_mcp_cmd_{id}.json
@@ -16,6 +16,7 @@
 
 ;; IPC directory
 (setq *mcp-ipc-dir* "C:/temp/")
+(setq *mcp-version* "3.2")
 
 ;; -----------------------------------------------------------------------
 ;; JSON-like output helpers (minimal, no external library)
@@ -48,24 +49,35 @@
   )
 )
 
-(defun mcp-escape-string (s / result i ch)
-  "Escape quotes, backslashes and control characters in a string for JSON."
-  (if (null s) (setq s ""))
-  (setq result "" i 1)
-  (while (<= i (strlen s))
-    (setq ch (substr s i 1))
-    (cond
-      ((= ch "\"") (setq result (strcat result "\\\"")))
-      ((= ch "\\") (setq result (strcat result "\\\\")))
-      ((= ch "\n") (setq result (strcat result "\\n")))
-      ((= ch "\r") (setq result (strcat result "\\r")))
-      ((= ch "\t") (setq result (strcat result "\\t")))
-      ((< (ascii ch) 32) (setq result (strcat result " ")))
-      (t (setq result (strcat result ch)))
-    )
-    (setq i (1+ i))
+(defun mcp-int->hex4 (n / digits out)
+  "Format an integer 0..65535 as 4 uppercase hex digits."
+  (setq digits "0123456789ABCDEF" out "")
+  (repeat 4
+    (setq out (strcat (substr digits (1+ (rem n 16)) 1) out)
+          n (/ n 16))
   )
-  result
+  out
+)
+
+(defun mcp-escape-string (s / out)
+  "Escape a string for JSON: quotes, backslashes, control chars and non-ASCII
+   (as \\uXXXX), so the result file is plain ASCII and always valid JSON."
+  (if (null s) (setq s ""))
+  (foreach c (vl-string->list s)
+    (setq out
+      (cons
+        (cond
+          ((= c 34) "\\\"")
+          ((= c 92) "\\\\")
+          ((= c 10) "\\n")
+          ((= c 13) "\\r")
+          ((= c 9) "\\t")
+          ((or (< c 32) (> c 126)) (strcat "\\u" (mcp-int->hex4 c)))
+          (t (chr c))
+        )
+        out))
+  )
+  (if out (apply 'strcat (reverse out)) "")
 )
 
 (defun mcp-read-file-lines (filepath / fp line lines)
@@ -87,34 +99,67 @@
 ;; Simple JSON parser (extracts string values by key)
 ;; -----------------------------------------------------------------------
 
-(defun mcp-json-get-string (json key / search-str pos end-pos value)
-  "Extract a string value for a given key from JSON text."
+(defun mcp-hex->int (s / n i)
+  "Parse a hex string (e.g. \"00C7\") into an integer."
+  (setq n 0 i 1)
+  (while (<= i (strlen s))
+    (setq n (+ (* n 16) (vl-string-search (strcase (substr s i 1)) "0123456789ABCDEF"))
+          i (1+ i))
+  )
+  n
+)
+
+(defun mcp-json-parse-string-at (json pos / len out ch esc)
+  "Decode a JSON string starting at 1-based POS (just after the opening quote).
+   Handles \\\" \\\\ \\/ \\n \\r \\t \\b \\f and \\uXXXX escapes."
+  (setq len (strlen json))
+  (while (and (<= pos len) (/= (setq ch (substr json pos 1)) "\""))
+    (if (= ch "\\")
+      (progn
+        (setq esc (substr json (1+ pos) 1))
+        (cond
+          ((= esc "n") (setq out (cons "\n" out) pos (+ pos 2)))
+          ((= esc "r") (setq out (cons "\r" out) pos (+ pos 2)))
+          ((= esc "t") (setq out (cons "\t" out) pos (+ pos 2)))
+          ((= esc "b") (setq pos (+ pos 2)))
+          ((= esc "f") (setq pos (+ pos 2)))
+          ((= esc "u")
+           (setq out (cons (chr (mcp-hex->int (substr json (+ pos 2) 4))) out)
+                 pos (+ pos 6)))
+          (t (setq out (cons esc out) pos (+ pos 2)))  ; \" \\ \/
+        )
+      )
+      (setq out (cons ch out) pos (1+ pos))
+    )
+  )
+  (if out (apply 'strcat (reverse out)) "")
+)
+
+(defun mcp-json-get-string (json key / search-str pos len ch start)
+  "Extract the value for KEY as a string. String values are unescaped;
+   numbers and booleans are returned as their literal text; null gives nil."
   (setq search-str (strcat "\"" key "\""))
   (setq pos (vl-string-search search-str json))
   (if (null pos) nil
     (progn
-      ;; Find the colon after key
-      (setq pos (vl-string-search ":" json pos))
+      (setq pos (vl-string-search ":" json (+ pos (strlen search-str))))
       (if (null pos) nil
         (progn
-          ;; Find opening quote of value
-          (setq pos (vl-string-search "\"" json (1+ pos)))
-          (if (null pos) nil
-            (progn
-              (setq pos (+ pos 2))  ; 0-based search result + 2 = 1-based position after quote
-              ;; Find closing quote (skip escaped quotes)
-              (setq end-pos pos)
-              (while (and (<= end-pos (strlen json))
-                          (or (= end-pos pos)
-                              (/= (substr json end-pos 1) "\"")))
-                ;; Handle escaped characters
-                (if (= (substr json end-pos 1) "\\")
-                  (setq end-pos (+ end-pos 2))
-                  (setq end-pos (1+ end-pos))
-                )
-              )
-              (substr json pos (- end-pos pos))
-            )
+          (setq pos (+ pos 2) len (strlen json))  ; 1-based position after colon
+          (while (and (<= pos len) (member (substr json pos 1) '(" " "\t" "\n" "\r")))
+            (setq pos (1+ pos))
+          )
+          (setq ch (substr json pos 1))
+          (cond
+            ((= ch "\"") (mcp-json-parse-string-at json (1+ pos)))
+            ((or (= ch "{") (= ch "[")) nil)
+            (t
+             (setq start pos)
+             (while (and (<= pos len) (not (member (substr json pos 1) '("," "}" "]" " " "\t" "\n" "\r"))))
+               (setq pos (1+ pos))
+             )
+             (setq ch (substr json start (- pos start)))
+             (if (= ch "null") nil ch))
           )
         )
       )
@@ -140,11 +185,15 @@
           ;; Read number
           (setq num-start pos num-end pos)
           (while (and (<= num-end (strlen json))
-                      (or (member (substr json num-end 1) '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "." "-" "+"))
+                      (or (member (substr json num-end 1) '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "." "-" "+" "e" "E"))
                       ))
             (setq num-end (1+ num-end))
           )
-          (atof (substr json num-start (- num-end num-start)))
+          (if (> num-end num-start)
+            (atof (substr json num-start (- num-end num-start)))
+            ;; Value is not a bare number: accept numeric strings ("1.5"), else nil
+            ((lambda (s) (if (and s (distof s)) (distof s) nil)) (mcp-json-get-string json key))
+          )
         )
       )
     )
@@ -176,7 +225,8 @@
   (cond
     ;; --- Ping ---
     ((= cmd-name "ping")
-     (cons T "\"pong\""))
+     (cons T (strcat "{\"pong\":true,\"version\":\"" *mcp-version* "\",\"drawing\":\""
+                     (mcp-escape-string (getvar "DWGNAME")) "\"}")))
 
     ;; --- Freehand LISP execution ---
     ((= cmd-name "execute-lisp")
@@ -464,14 +514,20 @@
   (cons T (strcat "{\"layers\":[" layer-list "]}"))
 )
 
-(defun mcp-cmd-layer-create (params / name color linetype)
+(defun mcp-cmd-layer-create (params / name color linetype existed d)
   (setq name (mcp-json-get-string params "name"))
   (setq color (mcp-json-get-string params "color"))
   (setq linetype (mcp-json-get-string params "linetype"))
   (if (not color) (setq color "white"))
   (if (not linetype) (setq linetype "CONTINUOUS"))
-  (ensure_layer_exists name color linetype)
-  (cons T (strcat "{\"name\":\"" name "\"}"))
+  (setq existed (tblsearch "LAYER" name))
+  (if existed
+    (mcp-layer-apply name color linetype nil)   ; update instead of silently ignoring
+    (ensure_layer_exists name color linetype))
+  (setq d (tblsearch "LAYER" name))
+  (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"color\":" (itoa (abs (cdr (assoc 62 d))))
+                  ",\"linetype\":\"" (mcp-escape-string (cdr (assoc 6 d))) "\",\"created\":"
+                  (if existed "false" "true") "}"))
 )
 
 (defun mcp-cmd-layer-set-current (params / name)
@@ -505,24 +561,32 @@
   (cons T (strcat "{\"entity_type\":\"CIRCLE\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-polyline (params / pts-str closed layer pairs pt-str cx cy)
+(defun mcp-cmd-create-polyline (params / pts-str closed layer pairs pt-str cx cy verts)
   (setq pts-str (mcp-json-get-string params "points_str"))
   (setq closed (mcp-json-get-string params "closed"))
   (setq layer (mcp-json-get-string params "layer"))
-  (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
+  (if layer (ensure_layer_exists layer "white" "CONTINUOUS"))
   (if (not pts-str)
     (cons nil "points_str required (format: x1,y1;x2,y2;...)")
     (progn
-      (command "_PLINE")
-      (setq pairs (mcp-split-string pts-str ";"))
+      (setq pairs (vl-remove-if '(lambda (s) (= s "")) (mcp-split-string pts-str ";"))
+            verts nil)
       (foreach pt-str pairs
         (setq cx (atof (car (mcp-split-string pt-str ","))))
         (setq cy (atof (cadr (mcp-split-string pt-str ","))))
-        (command (list cx cy 0.0))
+        (setq verts (cons (cons 10 (list cx cy)) verts))
       )
-      (if (= closed "1") (command "_C") (command ""))
-      (cons T (strcat "{\"entity_type\":\"LWPOLYLINE\",\"handle\":\""
-                      (cdr (assoc 5 (entget (entlast)))) "\"}"))
+      (if (< (length verts) 2)
+        (cons nil "create_polyline needs at least 2 points")
+        ;; entmake instead of the PLINE command: no osnap/command-prompt side effects
+        (if (entmake (append (list '(0 . "LWPOLYLINE") '(100 . "AcDbEntity")
+                                   (cons 8 (if layer layer (getvar "CLAYER")))
+                                   '(100 . "AcDbPolyline") (cons 90 (length verts))
+                                   (cons 70 (if (= closed "1") 1 0)))
+                             (reverse verts)))
+          (cons T (strcat "{\"entity_type\":\"LWPOLYLINE\",\"handle\":\""
+                          (cdr (assoc 5 (entget (entlast)))) "\",\"vertices\":" (itoa (length verts)) "}"))
+          (cons nil "Could not create polyline")))
     )
   )
 )
@@ -797,9 +861,13 @@
   (setq sa (mcp-json-get-number params "start_angle"))
   (setq ea (mcp-json-get-number params "end_angle"))
   (setq layer (mcp-json-get-string params "layer"))
-  (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
-  (command "_ARC" "_C" (list cx cy 0.0) (list (+ cx radius) cy 0.0) "_A" (- ea sa))
-  (cons T (strcat "{\"entity_type\":\"ARC\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
+  (if layer (ensure_layer_exists layer "white" "CONTINUOUS"))
+  ;; entmake honours both angles (the old ARC C/start/Angle call always began at 0 deg)
+  (if (entmake (list '(0 . "ARC") (cons 8 (if layer layer (getvar "CLAYER")))
+                     (cons 10 (list cx cy 0.0)) (cons 40 radius)
+                     (cons 50 (* pi (/ sa 180.0))) (cons 51 (* pi (/ ea 180.0)))))
+    (cons T (strcat "{\"entity_type\":\"ARC\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
+    (cons nil "Could not create arc (check center, radius and angles)"))
 )
 
 (defun mcp-cmd-create-ellipse (params / cx cy mx my ratio layer)
@@ -827,19 +895,32 @@
   (cons T (strcat "{\"entity_type\":\"MTEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-hatch (params / entity-id pattern ent)
+(defun mcp-cmd-create-hatch (params / entity-id pattern scale ang ent before after)
   (setq entity-id (mcp-json-get-string params "entity_id"))
   (setq pattern (mcp-json-get-string params "pattern"))
+  (setq scale (mcp-json-get-number params "scale"))
+  (setq ang (mcp-json-get-number params "angle"))
   (if (not pattern) (setq pattern "ANSI31"))
+  (if (not scale) (setq scale 1.0))
+  (if (not ang) (setq ang 0.0))
   (if (= entity-id "last")
     (setq ent (entlast))
     (setq ent (handent entity-id))
   )
-  (if ent
-    (progn
-      (command "_HATCH" "_P" pattern "" "_S" ent "" "")
-      (cons T (strcat "{\"entity_type\":\"HATCH\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}")))
+  (if (not ent)
     (cons nil "Entity not found for hatching")
+    (progn
+      (setq before (entlast))
+      ;; -HATCH is the command-line version; plain HATCH opens the ribbon/dialog
+      ;; and never received the pattern. SOLID has no scale/angle prompts.
+      (if (= (strcase pattern) "SOLID")
+        (command "_.-HATCH" "_P" "SOLID" "_S" ent "" "")
+        (command "_.-HATCH" "_P" pattern scale ang "_S" ent "" ""))
+      (repeat 3 (if (= 1 (logand 1 (getvar "CMDACTIVE"))) (command)))
+      (setq after (entlast))
+      (if (and after (not (equal after before)) (= (cdr (assoc 0 (entget after))) "HATCH"))
+        (cons T (strcat "{\"entity_type\":\"HATCH\",\"handle\":\"" (cdr (assoc 5 (entget after))) "\"}"))
+        (cons nil "Hatch was not created (is the boundary a closed polyline/circle?)")))
   )
 )
 
@@ -993,15 +1074,18 @@
 
 ;; --- Layer operations ---
 
-(defun mcp-cmd-layer-set-properties (params / name color linetype lineweight)
+(defun mcp-cmd-layer-set-properties (params / name color linetype lineweight d)
   (setq name (mcp-json-get-string params "name"))
   (setq color (mcp-json-get-string params "color"))
   (setq linetype (mcp-json-get-string params "linetype"))
   (setq lineweight (mcp-json-get-string params "lineweight"))
-  (if color (command "_.-LAYER" "_COLOR" color name ""))
-  (if linetype (command "_.-LAYER" "_LTYPE" linetype name ""))
-  (if lineweight (command "_.-LAYER" "_LWEIGHT" lineweight name ""))
-  (cons T (strcat "{\"name\":\"" name "\"}"))
+  (if (not (tblsearch "LAYER" name))
+    (cons nil (strcat "Layer not found: " name))
+    (progn
+      (mcp-layer-apply name color linetype lineweight)
+      (setq d (tblsearch "LAYER" name))
+      (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"color\":" (itoa (abs (cdr (assoc 62 d))))
+                      ",\"linetype\":\"" (mcp-escape-string (cdr (assoc 6 d))) "\"}"))))
 )
 
 (defun mcp-cmd-layer-freeze (params / name)
@@ -1273,7 +1357,7 @@
 ;; Main dispatcher — called by "(c:mcp-dispatch)" from Python
 ;; -----------------------------------------------------------------------
 
-(defun c:mcp-dispatch ( / cmd-files cmd-file json-text request-id cmd-name params-str result result-file)
+(defun c:mcp-dispatch ( / cmd-files cmd-file json-text request-id cmd-name params-str result result-file old-osmode old-cmdecho)
   "Find pending command file, dispatch, write result."
   ;; Find first pending command file
   (setq cmd-files (vl-directory-files *mcp-ipc-dir* "autocad_mcp_cmd_*.json" 1))
@@ -1283,6 +1367,9 @@
       ;; Process first command
       (setq cmd-file (strcat *mcp-ipc-dir* (car cmd-files)))
       (setq json-text (mcp-read-file-lines cmd-file))
+      ;; Claim the command right away: Python treats the file's disappearance as
+      ;; "dispatcher is alive", even if the command itself takes a while.
+      (vl-file-delete cmd-file)
 
       (if (not json-text)
         (princ "\nMCP: Cannot read command file")
@@ -1296,13 +1383,22 @@
             (progn
               (princ (strcat "\nMCP: Dispatching " cmd-name " [" request-id "]"))
 
-              ;; Execute via whitelist dispatcher
+              ;; Execute via whitelist dispatcher. Running object snaps would
+              ;; pull command-line points onto nearby geometry, and echo slows
+              ;; long batches, so both are off while a command runs.
+              (setq old-osmode (getvar "OSMODE") old-cmdecho (getvar "CMDECHO"))
+              (setvar "OSMODE" 0)
+              (setvar "CMDECHO" 0)
               (setq result
                 (vl-catch-all-apply
                   'mcp-dispatch-command
                   (list cmd-name json-text)
                 )
               )
+              ;; Leave no half-finished command behind
+              (repeat 4 (if (= 1 (logand 1 (getvar "CMDACTIVE"))) (command)))
+              (setvar "OSMODE" old-osmode)
+              (setvar "CMDECHO" old-cmdecho)
 
               ;; Handle error from vl-catch-all-apply
               (if (vl-catch-all-error-p result)
@@ -1333,12 +1429,141 @@
 ;; Utility helpers (defined if not already loaded from external files)
 ;; -----------------------------------------------------------------------
 
-(if (not ensure_layer_exists)
-  (defun ensure_layer_exists (name color linetype)
-    "Create layer if it doesn't exist."
-    (if (not (tblsearch "LAYER" name))
-      (command "_.-LAYER" "_NEW" name "_COLOR" color name "_LTYPE" linetype name "")
+(setq *mcp-color-names*
+  '(("RED" . 1) ("YELLOW" . 2) ("GREEN" . 3) ("CYAN" . 4) ("BLUE" . 5)
+    ("MAGENTA" . 6) ("WHITE" . 7) ("BLACK" . 7) ("GRAY" . 8) ("GREY" . 8)
+    ("VERMELHO" . 1) ("AMARELO" . 2) ("VERDE" . 3) ("CIANO" . 4) ("AZUL" . 5)
+    ("BRANCO" . 7) ("CINZA" . 8)))
+
+(defun mcp-color->int (color / n)
+  "Accept an ACI number (1-255, as number or string) or a color name."
+  (cond
+    ((numberp color) (fix color))
+    ((/= (type color) 'STR) 7)
+    ((and (setq n (distof color)) (<= 1 n 255)) (fix n))
+    ((assoc (strcase color) *mcp-color-names*) (cdr (assoc (strcase color) *mcp-color-names*)))
+    (t 7)
+  )
+)
+
+(defun mcp-lin-read-def (path lt / fp line desc pattern found)
+  "Find *LT in a .lin file. Returns (description . pattern-string) or nil."
+  (if (setq fp (open path "r"))
+    (progn
+      (while (and (not pattern) (setq line (read-line fp)))
+        (setq line (vl-string-trim " \t" line))
+        (cond
+          (found
+           (if (and (> (strlen line) 1) (/= (substr line 1 1) ";"))
+             (setq pattern line)))
+          ((= (strcase (substr line 1 (+ (strlen lt) 2))) (strcat "*" (strcase lt) ","))
+           (setq found T desc (substr line (+ (strlen lt) 3))))
+        )
+      )
+      (close fp)
+      (if pattern (cons desc pattern))
     )
+  )
+)
+
+(defun mcp-entmake-simple-linetype (lt def / parts dashes total)
+  "Create LT from a simple .lin pattern line (\"A,12.7,-6.35\"). Complex
+   linetypes (with [shape/text] elements) are not handled and return nil."
+  (if (and def (not (vl-string-search "[" (cdr def))))
+    (progn
+      (setq parts (mcp-split-string (cdr def) ","))
+      (if (= (strcase (vl-string-trim " " (car parts))) "A") (setq parts (cdr parts)))
+      (setq dashes (mapcar 'atof parts)
+            total (apply '+ (mapcar 'abs dashes)))
+      (entmake (append
+                 (list '(0 . "LTYPE") '(100 . "AcDbSymbolTableRecord") '(100 . "AcDbLinetypeTableRecord")
+                       (cons 2 lt) '(70 . 0) (cons 3 (car def)) '(72 . 65)
+                       (cons 73 (length dashes)) (cons 40 total))
+                 (apply 'append (mapcar '(lambda (d) (list (cons 49 d) '(74 . 0))) dashes))))
+    )
+  )
+)
+
+;; Localized AutoCAD versions ship .lin files with translated names
+;; (pt-BR: DASHED is TRACEJADA). English base name -> pt-BR base name.
+(setq *mcp-linetype-aliases*
+  (list '("BORDER" . "BORDA") '("CENTER" . "CENTRO") (cons "DASHDOT" (strcat "TRA" (chr 199) "OPONTO"))
+        '("DASHED" . "TRACEJADA") '("DIVIDE" . "DIVISA") '("DOT" . "PONTO")
+        '("HIDDEN" . "OCULTA") '("PHANTOM" . "FANTASMA")))
+
+(defun mcp-linetype-alias (lt / u base suffix)
+  "Translated name for a standard English linetype (keeps 2 / X2 suffix), or nil."
+  (setq u (strcase lt) suffix "")
+  (cond ((wcmatch u "*X2") (setq base (substr u 1 (- (strlen u) 2)) suffix "X2"))
+        ((wcmatch u "*2") (setq base (substr u 1 (1- (strlen u))) suffix "2"))
+        (t (setq base u)))
+  (if (assoc base *mcp-linetype-aliases*)
+    (strcat (cdr (assoc base *mcp-linetype-aliases*)) suffix))
+)
+
+(defun mcp-ensure-linetype (lt / path old-filedia def)
+  "Make sure linetype LT exists, loading it from the standard .lin files.
+   Returns the linetype name to use (falls back to Continuous)."
+  (cond
+    ((or (null lt) (= (strcase lt) "CONTINUOUS") (= (strcase lt) "BYLAYER")) "Continuous")
+    ((tblsearch "LTYPE" lt) (cdr (assoc 2 (tblsearch "LTYPE" lt))))
+    (t
+     ;; -LINETYPE _Load does not load anything when driven from AutoLISP here,
+     ;; so read the definition from the .lin file and entmake it.
+     ;; The requested name is kept even when the definition comes from a
+     ;; translated alias, so callers always get the name they asked for.
+     (foreach f '("acadiso.lin" "acad.lin" "acadltiso.lin" "acadlt.lin")
+       (if (and (not (tblsearch "LTYPE" lt)) (setq path (findfile f)))
+         (progn
+           (setq def (mcp-lin-read-def path lt))
+           (if (and (not def) (mcp-linetype-alias lt))
+             (setq def (mcp-lin-read-def path (mcp-linetype-alias lt))))
+           (mcp-entmake-simple-linetype (strcase lt) def)
+         )
+       )
+     )
+     ;; Complex linetypes: fall back to the command (FILEDIA off so it cannot open a dialog)
+     (if (and (not (tblsearch "LTYPE" lt)) (setq path (findfile "acadiso.lin")))
+       (progn
+         (setq old-filedia (getvar "FILEDIA"))
+         (setvar "FILEDIA" 0)
+         (command "_.-LINETYPE" "_L" lt path "")
+         (repeat 3 (if (= 1 (logand 1 (getvar "CMDACTIVE"))) (command)))
+         (setvar "FILEDIA" old-filedia)
+       )
+     )
+     (if (tblsearch "LTYPE" lt) (cdr (assoc 2 (tblsearch "LTYPE" lt))) "Continuous"))
+  )
+)
+
+(defun mcp-layer-apply (name color linetype lineweight / d lw)
+  "Set color / linetype / lineweight on an existing layer record via entmod."
+  (setq d (entget (tblobjname "LAYER" name)))
+  (if color
+    (setq d (subst (cons 62 (* (if (minusp (cdr (assoc 62 d))) -1 1) (mcp-color->int color)))
+                   (assoc 62 d) d)))
+  (if linetype
+    (setq d (subst (cons 6 (mcp-ensure-linetype linetype)) (assoc 6 d) d)))
+  (if lineweight
+    (progn
+      (setq lw (if (wcmatch (strcase lineweight) "DEFAULT,PADR*") -3 (distof lineweight)))
+      (if (and lw (> lw 0) (< lw 3)) (setq lw (* lw 100)))  ; mm -> hundredths of mm
+      (if lw
+        (progn
+          (setq lw (fix (if (minusp lw) lw (+ lw 0.5))))
+          (setq d (if (assoc 370 d)
+                    (subst (cons 370 lw) (assoc 370 d) d)
+                    (append d (list (cons 370 lw)))))))))
+  (entmod d)
+)
+
+;; Always (re)define: an older buggy version may still be loaded in the session.
+(defun ensure_layer_exists (name color linetype)
+  "Create layer NAME with COLOR and LINETYPE if it doesn't exist."
+  (if (not (tblsearch "LAYER" name))
+    (entmake (list '(0 . "LAYER") '(100 . "AcDbSymbolTableRecord") '(100 . "AcDbLayerTableRecord")
+                   (cons 2 name) '(70 . 0) (cons 62 (mcp-color->int color))
+                   (cons 6 (mcp-ensure-linetype linetype))))
   )
 )
 
@@ -1375,7 +1600,7 @@
 ;; Startup message
 ;; -----------------------------------------------------------------------
 
-(princ "\n=== MCP Dispatch v3.1 loaded ===")
+(princ (strcat "\n=== MCP Dispatch v" *mcp-version* " loaded ==="))
 (princ "\nIPC directory: ")
 (princ *mcp-ipc-dir*)
 (princ "\nReady for commands via (c:mcp-dispatch)")
