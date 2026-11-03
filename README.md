@@ -51,7 +51,7 @@ Add to your MCP client configuration (e.g. Claude Desktop `claude_desktop_config
     "autocad-mcp": {
       "command": "C:\\path\\to\\autocad-mcp\\.venv\\Scripts\\python.exe",
       "args": ["-m", "autocad_mcp"],
-      "env": { "AUTOCAD_MCP_BACKEND": "auto" }
+      "env": { "AUTOCAD_MCP_BACKEND": "file_ipc" }
     }
   }
 }
@@ -72,8 +72,7 @@ If your MCP client runs in WSL (e.g. Claude Code), launch the server through `cm
     "autocad-mcp": {
       "type": "stdio",
       "command": "cmd.exe",
-      "args": ["/d", "/s", "/c", "cd /d C:\\path\\to\\autocad-mcp && .venv\\Scripts\\python.exe -m autocad_mcp"],
-      "env": { "AUTOCAD_MCP_BACKEND": "auto" }
+      "args": ["/d", "/s", "/c", "cd /d C:\\path\\to\\autocad-mcp && set AUTOCAD_MCP_BACKEND=file_ipc&& .venv\\Scripts\\python.exe -m autocad_mcp"]
     }
   }
 }
@@ -88,6 +87,67 @@ system(operation="status")
 ```
 
 You should see `backend: "file_ipc"` if AutoCAD is running, or `backend: "ezdxf"` for headless mode.
+
+For native DWG work, require `file_ipc`; the examples above disable headless fallback.
+Verify `DWGNAME`, `DWGPREFIX`, `CTAB` and `DBMOD` with `drawing.get_variables`, then
+inspect a screenshot before editing. `status` alone does not identify the active DWG.
+Use a Windows-local working copy if Windows cannot access a WSL UNC path, and copy
+saved deliverables back explicitly. Never use `drawing.create` to make a working copy:
+it erases and purges the active drawing.
+
+## Journaled native revisions
+
+`system(operation="revision", data={"action": "read", "drawing": "C:/work/copy.dwg",
+"handles": ["ABCD"]})` reads native entities. The revision adapter supports bounded
+exports, layout frames, guarded edits, plotting and AutoCAD 2010 saves. Each mutation
+batch has 1–7 operations, a unique journal path, expected document identity and old
+entity values. Receipts retain before/after state and created handles. Read the
+[operation reference and recovery procedure](docs-revision.md) before use.
+
+Revision clouds can follow an orthogonal route instead of enclosing unrelated labels:
+
+```json
+{
+  "action": "batch",
+  "drawing": "C:/work/copy.dwg",
+  "id": "route-cloud-01",
+  "journal": "C:/work/route-cloud-01.json",
+  "operations": [{
+    "kind": "cloud", "item": "approved-change-42",
+    "space": "Model", "layer": "REV-01",
+    "points": [[0,0], [8,0], [8,2], [2,2], [2,8], [0,8]],
+    "arc": 0.4, "text_height": 0.3, "revision": "01",
+    "marker_position": [10,3]
+  }]
+}
+```
+
+Create the revision layer first. Pass this object to `system` with `operation="revision"`.
+For the Windows CLI, save the object as `request.json` (the extra `action` is ignored):
+
+```powershell
+python -m autocad_mcp.revision batch request.json --output receipt.json
+```
+
+An existing MCP session can use the updated helper through `execute_lisp` without
+acquiring a new tool schema: replace `action` with `operation` in the request, then
+compile on WSL and submit the resulting expression as `data.code`:
+
+```bash
+python -m autocad_mcp.revision compile request.json \
+  --lisp-path C:/path/to/autocad-mcp/lisp-code/revision_tools.lsp --output batch.lsp
+```
+
+Keep the Python compiler and Windows LISP helper at the same repository revision.
+Inspect native readback and a screenshot after every batch; save checkpoints between
+sheets. Journals are evidence, not automatic rollback. Serialize desktop clients and
+human edits. On timeout, reconcile the pending receipt and actual drawing before any
+retry; newer clients hold dispatch until explicit acknowledgement. Older running
+clients need reconnecting to acquire the process lease and new operation schema.
+
+The reusable `expected_state` helper preserves the first DXF value when codes repeat.
+`cloud_covers_bounds` checks an entire target rectangle against a cloud polygon,
+including its concave cutouts; bounding-box overlap alone is insufficient.
 
 ## Tools
 
@@ -200,12 +260,21 @@ AutoLISP was added to AutoCAD LT in the **2024 release (Windows only)**. AutoCAD
 | Supported (LT 2024+ Windows) | Not Supported |
 |-------------------------------|---------------|
 | `.lsp` / `.fas` / `.vlx` / `.dcl` | VLIDE (Visual LISP IDE) |
-| All `vl-*` utility functions | `vlax-*` (ActiveX/COM) |
+| Supported `vl-*` and selected `vla-*`/`vlax-*` functions | Full ActiveX/COM API parity |
 | File I/O (`open`, `read-line`, etc.) | Express Tools |
 | Entity access (`entget`, `entmod`, etc.) | 3D operations |
 | Selection sets | AutoLISP on Mac |
 
-The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
+The revision helper was exercised in Windows AutoCAD LT 2027. It uses selected
+`vla-*`/`vlax-*` functions available inside that runtime; this does not imply support
+for the complete ActiveX API or external COM automation. Qualify required operations
+on a disposable drawing for other releases.
+
+After a document switch, a stale cached command window can prevent command pickup.
+Inspect the desktop and pending receipts first. If the command was never picked up
+and no mutation occurred, `system(operation="init")` refreshes the connection; verify
+the active drawing again before resuming. Do not use reinitialization to bypass an
+uncertain completion hold.
 
 ## What's New in v3.1
 

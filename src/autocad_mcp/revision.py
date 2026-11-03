@@ -46,6 +46,106 @@ def literal(value):
     raise RevisionError(f"UNSUPPORTED_VALUE:{type(value).__name__}")
 
 
+def expected_state(entity, codes=(0, 330, 410, 8, 10, 41, 42, 43, 50)):
+    """First DXF occurrence, matching AutoLISP assoc (polylines repeat group 10)."""
+    fields = {}
+    for code, value in entity["dxf"]:
+        fields.setdefault(code, value)
+    return {str(code): fields[code] for code in codes if code in fields}
+
+
+def normalize_cloud(op):
+    """A bounded simple orthogonal outline, CCW so positive bulges face outward."""
+
+    def point(p):
+        if (
+            not isinstance(p, (list, tuple))
+            or len(p) != 2
+            or any(type(v) not in (int, float) or not math.isfinite(v) for v in p)
+        ):
+            raise RevisionError("CLOUD_FINITE_2D_POINT_REQUIRED")
+        return list(p)
+
+    for key in ("arc", "text_height"):
+        value = op.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise RevisionError("CLOUD_POSITIVE_ARC_AND_TEXT_HEIGHT_REQUIRED")
+    if "points" in op:
+        points = [point(p) for p in op["points"]]
+        if points and points[0] == points[-1]:
+            points.pop()
+    else:
+        lo, hi = point(op.get("min")), point(op.get("max"))
+        if lo[0] >= hi[0] or lo[1] >= hi[1]:
+            raise RevisionError("INVALID_CLOUD_BOUNDS")
+        points = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+    if not 4 <= len(points) <= 32:
+        raise RevisionError("CLOUD_OUTLINE_4_TO_32_VERTICES_REQUIRED")
+    edges = list(zip(points, points[1:] + points[:1]))
+    for a, b in edges:
+        if (a[0] == b[0]) == (a[1] == b[1]):
+            raise RevisionError("CLOUD_ORTHOGONAL_NONZERO_EDGES_REQUIRED")
+    for i, (a, b) in enumerate(edges):
+        c = edges[(i + 1) % len(edges)][1]
+        if sum((b[k] - a[k]) * (c[k] - b[k]) for k in (0, 1)) < 0:
+            raise RevisionError("CLOUD_SELF_INTERSECTION")
+    for i, (a, b) in enumerate(edges):
+        for j, (c, d) in enumerate(edges[i + 1 :], i + 1):
+            if j == i + 1 or (i == 0 and j == len(edges) - 1):
+                continue
+            if all(
+                max(min(a[k], b[k]), min(c[k], d[k])) <= min(max(a[k], b[k]), max(c[k], d[k]))
+                for k in (0, 1)
+            ):
+                raise RevisionError("CLOUD_SELF_INTERSECTION")
+    area2 = sum(a[0] * b[1] - b[0] * a[1] for a, b in edges)
+    if not area2:
+        raise RevisionError("CLOUD_ZERO_AREA")
+    if sum(math.ceil(math.dist(a, b) / op["arc"]) for a, b in edges) > 4096:
+        raise RevisionError("CLOUD_TOO_COMPLEX")
+    op["points"] = points if area2 > 0 else list(reversed(points))
+    op["min"] = [min(p[k] for p in points) for k in (0, 1)]
+    op["max"] = [max(p[k] for p in points) for k in (0, 1)]
+    if "marker_position" in op:
+        op["marker_position"] = point(op["marker_position"])
+    return op
+
+
+def cloud_covers_bounds(points, lo, hi):
+    """Coverage by the inner orthogonal polygon; its bounding box alone is insufficient."""
+    if any(
+        not isinstance(p, (list, tuple))
+        or len(p) != 2
+        or any(type(v) not in (int, float) or not math.isfinite(v) for v in p)
+        for p in (lo, hi)
+    ) or any(lo[k] > hi[k] for k in (0, 1)):
+        raise RevisionError("INVALID_TARGET_BOUNDS")
+    outline = normalize_cloud(dict(points=points, arc=1e9, text_height=1))["points"]
+    edges = list(zip(outline, outline[1:] + outline[:1]))
+
+    def inside(x, y):
+        if any(
+            min(a[0], b[0]) <= x <= max(a[0], b[0]) and min(a[1], b[1]) <= y <= max(a[1], b[1])
+            for a, b in edges
+        ):
+            return True
+        return (
+            sum(
+                a[0] > x and min(a[1], b[1]) <= y < max(a[1], b[1])
+                for a, b in edges
+                if a[0] == b[0]
+            )
+            % 2
+            == 1
+        )
+
+    axes = []
+    for k in (0, 1):
+        cuts = sorted({lo[k], hi[k], *(p[k] for p in outline if lo[k] < p[k] < hi[k])})
+        axes.append(cuts + [(a + b) / 2 for a, b in zip(cuts, cuts[1:])])
+    return all(inside(x, y) for x in axes[0] for y in axes[1])
+
+
 def normalize_ops(ops):
     if not isinstance(ops, list) or not 1 <= len(ops) <= 7:
         raise RevisionError("BATCH_SIZE_1_TO_7_REQUIRED")
@@ -53,6 +153,8 @@ def normalize_ops(ops):
     touched = set()
     for original in ops:
         op = dict(original)
+        if op.get("kind") == "cloud":
+            op = normalize_cloud(op)
         if not op.get("item"):
             raise RevisionError("ITEM_REQUIRED")
         if op.get("handle"):
