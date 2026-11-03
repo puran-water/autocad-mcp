@@ -49,7 +49,7 @@
 )
 
 (defun mcp-escape-string (s / result i ch)
-  "Escape quotes and backslashes in a string for JSON."
+  "Escape quotes, backslashes and control characters in a string for JSON."
   (if (null s) (setq s ""))
   (setq result "" i 1)
   (while (<= i (strlen s))
@@ -57,6 +57,10 @@
     (cond
       ((= ch "\"") (setq result (strcat result "\\\"")))
       ((= ch "\\") (setq result (strcat result "\\\\")))
+      ((= ch "\n") (setq result (strcat result "\\n")))
+      ((= ch "\r") (setq result (strcat result "\\r")))
+      ((= ch "\t") (setq result (strcat result "\\t")))
+      ((< (ascii ch) 32) (setq result (strcat result " ")))
       (t (setq result (strcat result ch)))
     )
     (setq i (1+ i))

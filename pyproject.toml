@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.2.1,<2.0",
+    "mcp[cli]>=1.10.0,<2.0",
     "ezdxf>=0.18",
     "matplotlib>=3.7",
     "Pillow>=10.0.0",

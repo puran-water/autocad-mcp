@@ -71,7 +71,7 @@ dev = [
 requires-dist = [
     { name = "ezdxf", specifier = ">=0.18" },
     { name = "matplotlib", specifier = ">=3.7" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.2.1,<2.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.10.0,<2.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=305" },
     { name = "structlog", specifier = ">=24.0.0" },

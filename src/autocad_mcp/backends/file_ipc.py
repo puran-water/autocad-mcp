@@ -170,7 +170,9 @@ class FileIPCBackend(AutoCADBackend):
                             text = result_file.read_text(encoding="utf-8")
                         except UnicodeDecodeError:
                             text = result_file.read_text(encoding="cp1252")
-                        data = json.loads(text)
+                        # strict=False: results written by older dispatchers may contain
+                        # raw newlines/tabs inside strings, which strict JSON rejects
+                        data = json.loads(text, strict=False)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
                             return CommandResult(
