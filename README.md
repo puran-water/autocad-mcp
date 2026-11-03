@@ -149,6 +149,14 @@ The reusable `expected_state` helper preserves the first DXF value when codes re
 `cloud_covers_bounds` checks an entire target rectangle against a cloud polygon,
 including its concave cutouts; bounding-box overlap alone is insufficient.
 
+For layer cleanup or matching new piping to an existing run, a guarded `patch` can
+set colour (DXF 62), layer (8), and lineweight (370). Include their actual old values
+in `expect`; use `null` only when the native DXF group is absent. For example,
+`"set": {"62": 221, "370": 13}` sets colour 221 and 0.13 mm lineweight. Read the
+source run and its layer first: assigning ByLayer can change the plotted appearance.
+The adapter validates the standard lineweight values, but does not decide the
+engineering role, crossing priority, plot-style overrides or approved house weights.
+
 ## Tools
 
 ### `drawing` — File/drawing management
