@@ -480,6 +480,9 @@ async def system(
       get_backend   — Return current backend name and capabilities.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
+      revision      — Journaled native batch/read/export_page/frames/plot/save. data: {action, drawing, ...}
+      desktop       — Read Windows window/dialog state and pending IPC receipt.
+      acknowledge   — Acknowledge reconciled late completion. data: {request_id}
       execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
     """
     data = data or {}
@@ -516,6 +519,23 @@ async def system(
         backend = await get_backend()
         result = await backend.status()
         return _json(result.to_dict())
+    elif operation == "revision":
+        from autocad_mcp.revision import execute
+        backend = await get_backend()
+        result = await execute(backend, data.pop("action"), data)
+        return await add_screenshot_if_available(result, include_screenshot)
+    elif operation == "desktop":
+        from autocad_mcp.desktop import observe, inspect_pending
+        backend = await get_backend()
+        if backend.name != "file_ipc":
+            return _json({"ok": False, "error": "NATIVE_BACKEND_REQUIRED"})
+        return _json({"desktop": observe(backend._hwnd), "ipc": inspect_pending(backend._ipc_dir)})
+    elif operation == "acknowledge":
+        from autocad_mcp.desktop import acknowledge
+        backend = await get_backend()
+        if backend.name != "file_ipc":
+            return _json({"ok": False, "error": "NATIVE_BACKEND_REQUIRED"})
+        return _json(acknowledge(backend._ipc_dir, data["request_id"]))
     elif operation == "execute_lisp":
         backend = await get_backend()
         if not data.get("code"):
