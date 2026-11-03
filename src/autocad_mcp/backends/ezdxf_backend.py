@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
-from pathlib import Path
-from typing import Any
 
 import ezdxf
 import structlog
@@ -75,7 +72,7 @@ class EzdxfBackend(AutoCADBackend):
     async def drawing_info(self) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
-        layers = [l.dxf.name for l in self._doc.layers]
+        layers = [layer.dxf.name for layer in self._doc.layers]
         entity_count = len(self._msp)
         blocks = [b.name for b in self._doc.blocks if not b.name.startswith("*")]
         return CommandResult(ok=True, payload={
@@ -362,13 +359,13 @@ class EzdxfBackend(AutoCADBackend):
 
     async def layer_list(self) -> CommandResult:
         layers = []
-        for l in self._doc.layers:
+        for layer in self._doc.layers:
             layers.append({
-                "name": l.dxf.name,
-                "color": l.dxf.get("color", 7),
-                "linetype": l.dxf.get("linetype", "Continuous"),
-                "is_frozen": l.is_frozen(),
-                "is_locked": l.is_locked(),
+                "name": layer.dxf.name,
+                "color": layer.dxf.get("color", 7),
+                "linetype": layer.dxf.get("linetype", "Continuous"),
+                "is_frozen": layer.is_frozen(),
+                "is_locked": layer.is_locked(),
             })
         return CommandResult(ok=True, payload={"layers": layers})
 
@@ -442,7 +439,6 @@ class EzdxfBackend(AutoCADBackend):
     async def block_insert_with_attributes(self, name, x, y, scale=1.0, rotation=0.0, attributes=None) -> CommandResult:
         if name not in self._doc.blocks:
             return CommandResult(ok=False, error=f"Block '{name}' not defined")
-        block = self._doc.blocks[name]
         e = self._msp.add_blockref(name, (x, y), dxfattribs={
             "xscale": scale, "yscale": scale, "zscale": scale,
             "rotation": rotation,
@@ -548,7 +544,6 @@ class EzdxfBackend(AutoCADBackend):
             # Calculate angle arc midpoint for dimension location
             a1 = math.atan2(y1 - cy, x1 - cx)
             a2 = math.atan2(y2 - cy, x2 - cx)
-            amid = (a1 + a2) / 2
             r = max(math.hypot(x1 - cx, y1 - cy), math.hypot(x2 - cx, y2 - cy)) * 0.7
             dim = self._msp.add_angular_dim_cra(
                 center=(cx, cy),
@@ -579,7 +574,7 @@ class EzdxfBackend(AutoCADBackend):
     async def create_leader(self, points, text) -> CommandResult:
         try:
             pts = [(p[0], p[1]) for p in points]
-            leader = self._msp.add_leader(pts)
+            self._msp.add_leader(pts)
             # Add text at the last point
             last = pts[-1]
             self._msp.add_mtext(text, dxfattribs={
@@ -610,7 +605,7 @@ class EzdxfBackend(AutoCADBackend):
 
     async def pid_list_symbols(self, category) -> CommandResult:
         """List CTO symbols from disk or built-in catalog."""
-        from autocad_mcp.pid.cto_library import CTO_ROOT, list_symbols
+        from autocad_mcp.pid.cto_library import list_symbols
         symbols = list_symbols(category)
         return CommandResult(ok=True, payload={"category": category, "symbols": symbols, "count": len(symbols)})
 

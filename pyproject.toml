@@ -13,9 +13,12 @@ dependencies = [
     "structlog>=24.0.0",
     "pywin32>=305; sys_platform == 'win32'",
 ]
+
+[dependency-groups]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "ruff>=0.5",
 ]
 
 [build-system]
@@ -28,3 +31,11 @@ packages = ["src/autocad_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

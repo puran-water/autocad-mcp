@@ -9,7 +9,6 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from autocad_mcp.client import (
-    _error,
     _json,
     _safe,
     add_screenshot_if_available,
