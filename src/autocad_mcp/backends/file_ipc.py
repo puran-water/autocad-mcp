@@ -24,6 +24,7 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
+from autocad_mcp.desktop import ipc_lease, inspect_pending
 from autocad_mcp.config import AUTOLOAD_DISPATCHER, IPC_DIR, IPC_LONG_TIMEOUT, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
@@ -128,6 +129,8 @@ class FileIPCBackend(AutoCADBackend):
             result = await self._dispatch("ping", {}, timeout=5.0)
             if result.ok:
                 break
+            if result.error in ("IPC_UNCERTAIN_RECONCILE_REQUIRED", "DESKTOP_BUSY_OTHER_CLIENT"):
+                return result
             log.info("ping_retry", attempt=attempt + 1, error=result.error)
             await asyncio.sleep(0.5)
 
@@ -169,10 +172,17 @@ class FileIPCBackend(AutoCADBackend):
         command file, so nothing is ever sent twice.
         """
         async with self._lock:
-            result, claimed = await self._dispatch_unlocked(command, params, timeout)
-            if not result.ok and not claimed:
-                result = CommandResult(ok=False, error=f"{result.error}\n{NOT_RESPONDING_HINT}")
-            return result
+            try:
+                with ipc_lease(self._ipc_dir):
+                    pending = inspect_pending(self._ipc_dir)
+                    if pending['pending']:
+                        return CommandResult(ok=False, error="IPC_UNCERTAIN_RECONCILE_REQUIRED", payload=pending)
+                    result, claimed = await self._dispatch_unlocked(command, params, timeout)
+                    if not result.ok and not claimed:
+                        result = CommandResult(ok=False, error=f"{result.error}\n{NOT_RESPONDING_HINT}")
+                    return result
+            except RuntimeError as exc:
+                return CommandResult(ok=False, error=str(exc))
 
     async def _dispatch_unlocked(
         self, command: str, params: dict, timeout: float | None = None
@@ -187,6 +197,8 @@ class FileIPCBackend(AutoCADBackend):
         result_file = self._ipc_dir / f"autocad_mcp_result_{request_id}.json"
         tmp_file = cmd_file.with_suffix(".tmp")
 
+        completed = False
+        pending_file = self._ipc_dir / 'pcad-pending.json'
         try:
             # Strip None values — the simple LISP JSON parser can't handle null
             clean_params = {k: v for k, v in params.items() if v is not None}
@@ -198,9 +210,11 @@ class FileIPCBackend(AutoCADBackend):
                 "ts": time.time(),
             }
             tmp_file.write_text(json.dumps(payload), encoding="utf-8")
+            pending_temp = pending_file.with_suffix('.tmp')
+            pending_temp.write_text(json.dumps(payload), encoding="utf-8")
+            pending_temp.replace(pending_file)
             tmp_file.rename(cmd_file)
-
-            # Type the fixed dispatch trigger
+            # Type the fixed dispatch trigger. Never cancel another in-flight operation.
             self._type_dispatch_trigger()
 
             # Poll for result. The dispatcher deletes the command file as soon as
@@ -239,6 +253,10 @@ class FileIPCBackend(AutoCADBackend):
                         data = json.loads(text, strict=False)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
+                            completed = True
+                            archive = self._ipc_dir / 'pcad-receipts'
+                            archive.mkdir(exist_ok=True)
+                            (archive / f'{request_id}.json').write_text(json.dumps(data), encoding="utf-8")
                             return CommandResult(
                                 ok=data.get("ok", False),
                                 payload=data.get("payload"),
@@ -255,8 +273,11 @@ class FileIPCBackend(AutoCADBackend):
             ), claimed
 
         finally:
-            # Cleanup
-            for f in (cmd_file, result_file, tmp_file):
+            # Uncertain dispatches retain intent, code and late completion evidence.
+            # Remove an unclaimed command so a later dispatcher cannot execute it.
+            if completed:
+                pending_file.unlink(missing_ok=True)
+            for f in ((cmd_file, result_file, tmp_file) if completed else (cmd_file, tmp_file)):
                 try:
                     f.unlink(missing_ok=True)
                 except OSError:
@@ -283,27 +304,7 @@ class FileIPCBackend(AutoCADBackend):
             return None
 
     def _type_dispatch_trigger(self):
-        """Post '(c:mcp-dispatch)' + Enter via WM_CHAR to MDIClient — no focus steal.
-
-        Sends ESC keystrokes first to cancel any stale pending command
-        (e.g. from a previous timeout leaving AutoCAD in a command prompt).
-        """
-        try:
-            import ctypes
-
-            WM_KEYDOWN = 0x0100
-            WM_KEYUP = 0x0101
-            VK_ESCAPE = 0x1B
-            target = self._command_hwnd or self._hwnd
-            post = ctypes.windll.user32.PostMessageW
-
-            # Cancel any pending command (2x ESC for nested commands)
-            for _ in range(2):
-                post(target, WM_KEYDOWN, VK_ESCAPE, 0)
-                post(target, WM_KEYUP, VK_ESCAPE, 0)
-            time.sleep(0.05)
-        except Exception as e:
-            log.error("dispatch_trigger_failed", error=str(e))
+        """Dispatch without ESC: a busy command line must be inspected, never cancelled implicitly."""
         self._post_text("(c:mcp-dispatch)")
 
     def _post_text(self, text: str):
@@ -323,15 +324,8 @@ class FileIPCBackend(AutoCADBackend):
             log.error("post_text_failed", error=str(e))
 
     def _cleanup_stale_files(self):
-        """Remove stale IPC files from previous sessions."""
-        try:
-            now = time.time()
-            for pattern in ("autocad_mcp_*.json", "autocad_mcp_*.tmp", "autocad_mcp_lisp_*.lsp"):
-                for f in self._ipc_dir.glob(pattern):
-                    if now - f.stat().st_mtime > STALE_THRESHOLD:
-                        f.unlink(missing_ok=True)
-        except OSError:
-            pass
+        """Retain IPC evidence; elapsed age never proves a native command completed."""
+        return
 
     # --- Drawing management ---
 

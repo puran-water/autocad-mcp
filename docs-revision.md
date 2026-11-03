@@ -1,0 +1,62 @@
+# Native revision operations
+
+`system(operation="revision", data={"action": ..., "drawing": "C:/full/path/copy.dwg", ...})`
+uses the File IPC backend. The eight MCP tool names are unchanged. Reconnect an older
+server process to acquire the new operations. The same implementation is available as
+`python -m autocad_mcp.revision ACTION request.json --output receipt.json` on Windows.
+
+Actions: `read` (1–100 handles), `export_page` (1–500 records, offset, definitions flag),
+`frames` (activate layouts for valid viewport IDs), `batch`, `plot`, `save`.
+Each export page ends with a completion/count record; a complete snapshot requires
+all contiguous pages from one unchanged drawing, including the definition pages.
+
+A batch has `id`, `journal` (new Windows JSON path), and 1–7 `operations`. Every operation
+has a change-list `item` and `kind`. Existing targets supply a `handle` and `expect`
+map of DXF codes to old values; include type, space, layer, owner and relevant geometry.
+Supported kinds:
+
+- `text`: `expected_text`, `text`; works on TEXT, MTEXT and ATTRIB, including long MTEXT.
+- `patch`: `set` DXF fields, every field present in `expect`; use `text` for MTEXT content.
+- `scale`: absolute positive `target`; expected XYZ scales, uniform absolute scale only.
+- `move`, `copy`: explicit `delta`; `erase`: captures original bounds in the journal.
+- `line`: `space`, `layer`, `start`, `end`; `polyline`: `space`, `layer`, `points`, `closed`.
+- `vertices`: straight planar LWPOLYLINE only; `expected_points`, `points` (2D coordinates).
+- `split-line`: expected endpoints and ordered `gap` points; retains line appearance.
+- `insert`: existing block `name`, `position`, `scale`, `rotation` in radians, `space`,
+  `layer`, optional `attributes` map; every requested attribute must exist uniquely.
+- `mtext`: `position`, `width`, `height`, `text`, `space`, `layer`, optional `style`.
+- `cloud`: `space`, `layer`, 2D `min`, `max`, positive `arc`, `text_height`, `revision`;
+  creates outward arc polyline, separate triangle and revision text.
+
+The journal records pre-state and native readback. It is not an automatic rollback.
+Inspect any interrupted entry and created handles before proceeding; never replay a
+batch with a different journal path to bypass duplicate protection. Take and inspect
+a screenshot after each batch. Verify saved results independently.
+
+`plot` uses a named `layout` and a new `path`, preserving its PC3/media/CTB settings.
+`save` without `path` saves the verified active copy; with a new `path`, `format:48`
+writes AutoCAD 2010. Older-format custom-object dialogs may require inspection.
+Never acknowledge an unseen dialog or convert/explode custom objects implicitly.
+
+## Desktop and uncertain completion
+
+All new File IPC clients share an OS lease in the IPC directory. They retain request
+intent and completion receipts; timeout blocks new dispatches and never sends ESC.
+Older already-running clients do not acquire this lease: serialize them explicitly
+or reconnect before editing. Coordinate human use of the same desktop separately.
+
+`system(operation="desktop")` observes windows and pending receipts without dispatch.
+For a session unable to initialize, use `python -m autocad_mcp.desktop observe`.
+`desktop screenshot --request window.json --output capture.png` captures the specified
+`hwnd`, including a modal dialog. `desktop button --request button.json` posts BM_CLICK
+only after matching the exact dialog HWND, child button HWND, PID, title and text.
+No global keyboard injection, default dialog answers or automatic cancellation.
+
+After reconciling a late result, `system(operation="acknowledge",data={"request_id":...})`
+or `desktop acknowledge --request request.json` archives that exact completion and
+releases the uncertainty hold. Missing completion evidence stays held; inspect the
+window and drawing before manual recovery. A timeout is never proof of no mutation.
+
+`revision compile request.json --lisp-path C:/.../revision_tools.lsp --output batch.lsp`
+compiles safely quoted data on WSL for an existing `system.execute_lisp` session.
+This compatibility route still requires manual client serialization and timeout checks.
