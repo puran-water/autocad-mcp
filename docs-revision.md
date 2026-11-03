@@ -25,8 +25,25 @@ Supported kinds:
 - `insert`: existing block `name`, `position`, `scale`, `rotation` in radians, `space`,
   `layer`, optional `attributes` map; every requested attribute must exist uniquely.
 - `mtext`: `position`, `width`, `height`, `text`, `space`, `layer`, optional `style`.
-- `cloud`: `space`, `layer`, 2D `min`, `max`, positive `arc`, `text_height`, `revision`;
-  creates outward arc polyline, separate triangle and revision text.
+- `cloud`: `space`, `layer`, positive `arc`, `text_height`, `revision`, and either 2D
+  `min`/`max` for a rectangle or `points` for a simple orthogonal polygon (4–32 vertices).
+  Creates an outward arc polyline, separate triangle and revision text. Optional
+  `marker_position: [x,y]` places the revision text's alignment point independently;
+  the triangle is centered around that point using `text_height`.
+  The compiler rejects nonfinite geometry, diagonal/zero-length edges, intersections
+  and outlines requiring more than 4096 arcs, and normalizes winding before dispatch.
+
+Use `autocad_mcp.revision.expected_state(entity)` with a native readback to form the
+geometry/identity precondition map. It retains the **first** occurrence of repeated DXF
+codes, matching AutoLISP `assoc`; `dict(entity["dxf"])` incorrectly keeps the last
+polyline vertex. Supply `expected_text` separately for text edits, and include any
+additional old DXF fields being patched.
+
+For cloud coverage, `cloud_covers_bounds(points, lo, hi)` checks the entire target
+rectangle against the polygon, including concave cutouts. A polygon's bounding box
+does **not** establish coverage. This conservative helper uses the inner straight
+outline; inspect native arc readback and screenshots as well. It does not identify
+which drawing objects require clouds or establish visual clearance automatically.
 
 The journal records pre-state and native readback. It is not an automatic rollback.
 Inspect any interrupted entry and created handles before proceeding; never replay a
