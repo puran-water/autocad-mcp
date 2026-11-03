@@ -517,10 +517,19 @@ class EzdxfBackend(AutoCADBackend):
 
     async def create_dimension_linear(self, x1, y1, x2, y2, dim_x, dim_y) -> CommandResult:
         try:
+            # Like DIMLINEAR: a dim line beside the points (outside their x-span, inside their
+            # y-span) is vertical, above/below is horizontal; otherwise follow the longer extent.
+            beside = not min(x1, x2) <= dim_x <= max(x1, x2)
+            within = min(y1, y2) <= dim_y <= max(y1, y2)
+            if beside == within:
+                vertical = beside
+            else:
+                vertical = abs(y2 - y1) > abs(x2 - x1)
             dim = self._msp.add_linear_dim(
                 base=(dim_x, dim_y),
                 p1=(x1, y1),
                 p2=(x2, y2),
+                angle=90 if vertical else 0,
             )
             dim.render()
             return CommandResult(ok=True, payload={"entity_type": "DIMENSION"})

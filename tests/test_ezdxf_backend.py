@@ -454,6 +454,21 @@ class TestAnnotation:
         assert r.ok
         assert r.payload["entity_type"] == "DIMENSION"
 
+    @pytest.mark.parametrize(
+        "pts, dim_pt, expected",
+        [
+            ((100, 0, 100, 60), (115, 30), 60.0),  # upstream #14: vertical edge
+            ((0, 0, 100, 0), (50, 20), 100.0),  # horizontal edge, dim line above
+            ((0, 0, 100, 60), (50, 80), 100.0),  # diagonal, dim line above -> horizontal
+            ((0, 0, 100, 60), (120, 30), 60.0),  # diagonal, dim line to the right -> vertical
+        ],
+    )
+    async def test_create_dimension_linear_orientation(self, backend, pts, dim_pt, expected):
+        r = await backend.create_dimension_linear(*pts, *dim_pt)
+        assert r.ok
+        dim = backend._msp.query("DIMENSION")[-1]
+        assert dim.get_measurement() == pytest.approx(expected)
+
     async def test_create_dimension_aligned(self, backend):
         r = await backend.create_dimension_aligned(0, 0, 100, 50, 10)
         assert r.ok
