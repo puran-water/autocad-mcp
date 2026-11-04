@@ -15,6 +15,11 @@ has a change-list `item` and `kind`. Existing targets supply a `handle` and `exp
 map of DXF codes to old values; include type, space, layer, owner and relevant geometry.
 Supported kinds:
 
+- `attributes`: one existing INSERT, `attributes` and `expected_attributes` maps with
+  the same 1–16 tag keys and string values. Tags are case-insensitive and must resolve
+  uniquely. Preflight checks every old value and attribute layer before any batch
+  mutation; native readback includes the block and all attached attributes. Use this
+  to revise function, loop and alarm labels together without separate attribute calls.
 - `text`: `expected_text`, `text`; works on TEXT, MTEXT and ATTRIB, including long MTEXT.
 - `patch`: `set` DXF fields, every field present in `expect`; use `text` for MTEXT content.
   DXF 6 selects a loaded linetype or ByLayer/ByBlock; native preflight refuses unknown
