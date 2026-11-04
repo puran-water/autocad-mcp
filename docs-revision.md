@@ -17,6 +17,10 @@ Supported kinds:
 
 - `text`: `expected_text`, `text`; works on TEXT, MTEXT and ATTRIB, including long MTEXT.
 - `patch`: `set` DXF fields, every field present in `expect`; use `text` for MTEXT content.
+  DXF 6 selects a loaded linetype or ByLayer/ByBlock; native preflight refuses unknown
+  names before any batch mutation. DXF 48 accepts a finite positive entity linetype
+  scale. Supply the old values explicitly, including `null` for an absent field.
+  Inspect the displayed pattern with the drawing's LTSCALE and viewport settings.
   DXF 370 supports standard lineweights in hundredths of a millimetre, including
   ByLayer (-1), ByBlock (-2) and Default (-3). Invalid weights are refused in both
   Python and LISP. Preserve effective plotted appearance when moving between layers.

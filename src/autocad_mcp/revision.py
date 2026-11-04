@@ -174,6 +174,14 @@ def normalize_ops(ops):
         if op.get("kind") == "patch":
             if not set(op.get("set", {})) <= set(op.get("expect", {})):
                 raise RevisionError("EXPECTED_FIELD_REQUIRED")
+            if 6 in op.get("set", {}):
+                name = op["set"][6]
+                if not isinstance(name, str) or not name.strip():
+                    raise RevisionError("INVALID_DXF_LINETYPE")
+            if 48 in op.get("set", {}):
+                scale = op["set"][48]
+                if type(scale) not in (int, float) or not math.isfinite(scale) or scale <= 0:
+                    raise RevisionError("INVALID_DXF_LINETYPE_SCALE")
             if 370 in op.get("set", {}):
                 weight = op["set"][370]
                 if type(weight) is not int or weight not in {
