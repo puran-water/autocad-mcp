@@ -144,6 +144,11 @@ even when `path` is omitted. It saves the verified active copy in that case;
 an explicit new destination must not exist. Verify `AC1024` in the saved DWG header.
 The ordinary `drawing.save`/QSAVE tool follows the application's save defaults.
 
+Guarded revision patches can set an entity's linetype (DXF 6) and linetype scale
+(DXF 48), for example electrical signal lines in a P&ID. The linetype must already
+be loaded, or be ByLayer/ByBlock; the scale must be finite and positive. Old-value
+checks apply to both fields. Inspect the native pattern at the intended plot scale.
+
 Inspect native readback and a screenshot after every batch; save checkpoints between
 sheets. Journals are evidence, not automatic rollback. Serialize desktop clients and
 human edits. On timeout, reconcile the pending receipt and actual drawing before any
