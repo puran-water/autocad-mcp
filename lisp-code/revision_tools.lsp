@@ -344,7 +344,10 @@
 (defun pcad:save (expected path format / doc)
   (pcad:assert-doc expected)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
-  (if path (progn (pcad:require (not (findfile path)) "SAVEAS_OUTPUT_EXISTS") (vla-SaveAs doc path format)) (vla-Save doc))
+  (if path
+    (pcad:require (not (findfile path)) "SAVEAS_OUTPUT_EXISTS")
+    (setq path (pcad:fullpath)))
+  (vla-SaveAs doc path format)
   (pcad:require (= (getvar "DBMOD") 0) "SAVE_NOT_CLEAN")
   (pcad:json (pcad:obj (list (cons "drawing" (pcad:fullpath)) (cons "bytes" (vl-file-size (pcad:fullpath))) (cons "dbmod" (getvar "DBMOD"))))))
 (princ)

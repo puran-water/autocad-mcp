@@ -54,8 +54,11 @@ batch with a different journal path to bypass duplicate protection. Take and ins
 a screenshot after each batch. Verify saved results independently.
 
 `plot` uses a named `layout` and a new `path`, preserving its PC3/media/CTB settings.
-`save` without `path` saves the verified active copy; with a new `path`, `format:48`
-writes AutoCAD 2010. Older-format custom-object dialogs may require inspection.
+`save` honors `format` with or without a new `path`; its default `48` writes
+AutoCAD 2010. Omitting `path` saves the verified active copy through `SaveAs` with
+that format. An explicit destination must not already exist. Verify the saved
+file's version bytes (`AC1024` for 2010); an ordinary `drawing.save`/QSAVE can use
+the application's newer default. Older-format custom-object dialogs may require inspection.
 Never acknowledge an unseen dialog or convert/explode custom objects implicitly.
 
 ## Desktop and uncertain completion

@@ -139,6 +139,11 @@ python -m autocad_mcp.revision compile request.json \
 ```
 
 Keep the Python compiler and Windows LISP helper at the same repository revision.
+Native revision `save` defaults to AutoCAD 2010 (`format:48`) and honors the format
+even when `path` is omitted. It saves the verified active copy in that case;
+an explicit new destination must not exist. Verify `AC1024` in the saved DWG header.
+The ordinary `drawing.save`/QSAVE tool follows the application's save defaults.
+
 Inspect native readback and a screenshot after every batch; save checkpoints between
 sheets. Journals are evidence, not automatic rollback. Serialize desktop clients and
 human edits. On timeout, reconcile the pending receipt and actual drawing before any
