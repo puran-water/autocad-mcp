@@ -155,6 +155,13 @@ native preflight checks unique tags, old values and unlocked layers before the b
 starts. This groups function/loop/alarm changes while retaining the seven-operation
 batch limit, before/after receipts and screenshot review. It does not infer loop identities.
 
+Use the guarded `rotate` revision operation to turn an existing planar block and its
+attributes together about its insertion point. `target` is an absolute angle in radians;
+include the expected insertion point (DXF 10), rotation (50) and normal (210), in addition
+to type, owner and layer. This supports upright instrument lettering without recreating
+each attribute. Recheck process/signal attachments: arbitrary equipment rotation can move
+its ports. Old-value failures now identify the handle, DXF field and conflicting values.
+
 Inspect native readback and a screenshot after every batch; save checkpoints between
 sheets. Journals are evidence, not automatic rollback. Serialize desktop clients and
 human edits. On timeout, reconcile the pending receipt and actual drawing before any

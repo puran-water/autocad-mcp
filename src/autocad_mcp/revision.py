@@ -171,6 +171,20 @@ def normalize_ops(ops):
         for key in ("expect", "set"):
             if key in op:
                 op[key] = {int(k): v for k, v in op[key].items()}
+        if op.get("kind") == "rotate":
+            expected = op.get("expect", {})
+            if not op.get("handle") or expected.get(0) != "INSERT":
+                raise RevisionError("INSERT_REQUIRED")
+            if not {10, 50, 210} <= set(expected):
+                raise RevisionError("EXPECTED_ROTATION_ANCHOR_NORMAL_REQUIRED")
+            anchor = expected[10]
+            if (not isinstance(anchor, (list, tuple)) or len(anchor) != 3
+                    or any(type(v) not in (int, float) or not math.isfinite(v) for v in anchor)
+                    or expected[210] != [0, 0, 1]):
+                raise RevisionError("PLANAR_INSERT_REQUIRED")
+            for value in (expected[50], op.get("target")):
+                if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value < math.tau:
+                    raise RevisionError("ROTATION_RADIANS_0_TO_2PI_REQUIRED")
         if op.get("kind") == "attributes":
             if not op.get("handle") or op.get("expect", {}).get(0) != "INSERT":
                 raise RevisionError("INSERT_REQUIRED")
