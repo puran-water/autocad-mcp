@@ -171,6 +171,17 @@ def normalize_ops(ops):
         for key in ("expect", "set"):
             if key in op:
                 op[key] = {int(k): v for k, v in op[key].items()}
+        if op.get("kind") == "spline-gap":
+            if not op.get("handle") or op.get("expect", {}).get(0) != "SPLINE":
+                raise RevisionError("SPLINE_REQUIRED")
+            if not isinstance(op.get("expected_dxf"), list) or not op["expected_dxf"]:
+                raise RevisionError("EXPECTED_CURVE_REQUIRED")
+            gap = op.get("gap")
+            if (not isinstance(gap, list) or len(gap) != 2
+                    or any(not isinstance(p, list) or len(p) != 3
+                           or any(type(v) not in (int, float) or not math.isfinite(v) for v in p)
+                           for p in gap)):
+                raise RevisionError("FINITE_GAP_POINTS_REQUIRED")
         if op.get("kind") == "rotate":
             expected = op.get("expect", {})
             if not op.get("handle") or expected.get(0) != "INSERT":
@@ -265,6 +276,17 @@ def compile_call(operation, data, *, lisp_path=None):
         ).hexdigest()
         args = [drawing, batch_id, digest, data["journal"], ops]
         fn = "pcad:batch"
+    elif operation == "rename_layers":
+        pairs = data["pairs"]
+        if not isinstance(pairs, list) or not 1 <= len(pairs) <= 7:
+            raise RevisionError("LAYER_BATCH_1_TO_7_REQUIRED")
+        if any(not isinstance(p, list) or len(p) != 2
+               or any(not isinstance(n, str) or not n.strip() for n in p)
+               for p in pairs):
+            raise RevisionError("LAYER_NAME_PAIRS_REQUIRED")
+        if len({p[0].upper() for p in pairs}) != len(pairs) or len({p[1].upper() for p in pairs}) != len(pairs):
+            raise RevisionError("DUPLICATE_LAYER_NAME")
+        args, fn = [drawing, pairs, data["journal"]], "pcad:rename-layers"
     elif operation == "frames":
         args, fn = [drawing], "pcad:frames"
     elif operation == "read":
