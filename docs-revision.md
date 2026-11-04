@@ -30,6 +30,10 @@ Supported kinds:
   ByLayer (-1), ByBlock (-2) and Default (-3). Invalid weights are refused in both
   Python and LISP. Preserve effective plotted appearance when moving between layers.
 - `scale`: absolute positive `target`; expected XYZ scales, uniform absolute scale only.
+- `rotate`: INSERT only; absolute `target` radians in [0, 2π), expected DXF 10/50/210.
+  Normal must be (0,0,1). Rotates the block and attached attributes about the unchanged
+  insertion point; preserves signed scales. Locked attribute layers are refused during
+  preflight. Verify attribute positions and connected ports in native readback/screenshots.
 - `move`, `copy`: explicit `delta`; `erase`: captures original bounds in the journal.
 - `line`: `space`, `layer`, `start`, `end`; `polyline`: `space`, `layer`, `points`, `closed`.
 - `vertices`: straight planar LWPOLYLINE only; `expected_points`, `points` (2D coordinates).
