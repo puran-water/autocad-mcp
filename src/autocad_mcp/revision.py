@@ -171,6 +171,21 @@ def normalize_ops(ops):
         for key in ("expect", "set"):
             if key in op:
                 op[key] = {int(k): v for k, v in op[key].items()}
+        if op.get("kind") == "attributes":
+            if not op.get("handle") or op.get("expect", {}).get(0) != "INSERT":
+                raise RevisionError("INSERT_REQUIRED")
+            for key in ("attributes", "expected_attributes"):
+                values = op.get(key)
+                if not isinstance(values, dict) or not 1 <= len(values) <= 16:
+                    raise RevisionError("ATTRIBUTE_MAP_1_TO_16_REQUIRED")
+                if any(not isinstance(k, str) or not k.strip() or not isinstance(v, str)
+                       for k, v in values.items()):
+                    raise RevisionError("ATTRIBUTE_STRINGS_REQUIRED")
+                if len({k.upper() for k in values}) != len(values):
+                    raise RevisionError("ATTRIBUTE_TAG_NOT_UNIQUE")
+                op[key] = {k.upper(): v for k, v in values.items()}
+            if set(op["attributes"]) != set(op["expected_attributes"]):
+                raise RevisionError("EXPECTED_ATTRIBUTE_REQUIRED")
         if op.get("kind") == "patch":
             if not set(op.get("set", {})) <= set(op.get("expect", {})):
                 raise RevisionError("EXPECTED_FIELD_REQUIRED")

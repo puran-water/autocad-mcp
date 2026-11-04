@@ -149,6 +149,12 @@ Guarded revision patches can set an entity's linetype (DXF 6) and linetype scale
 be loaded, or be ByLayer/ByBlock; the scale must be finite and positive. Old-value
 checks apply to both fields. Inspect the native pattern at the intended plot scale.
 
+For repeated instrument labels, an `attributes` operation updates up to 16 attributes
+on one existing block. Supply the changed `attributes` and their `expected_attributes`;
+native preflight checks unique tags, old values and unlocked layers before the batch
+starts. This groups function/loop/alarm changes while retaining the seven-operation
+batch limit, before/after receipts and screenshot review. It does not infer loop identities.
+
 Inspect native readback and a screenshot after every batch; save checkpoints between
 sheets. Journals are evidence, not automatic rollback. Serialize desktop clients and
 human edits. On timeout, reconcile the pending receipt and actual drawing before any
