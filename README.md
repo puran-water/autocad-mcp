@@ -168,6 +168,47 @@ human edits. On timeout, reconcile the pending receipt and actual drawing before
 retry; newer clients hold dispatch until explicit acknowledgement. Older running
 clients need reconnecting to acquire the process lease and new operation schema.
 
+### Consistent symbols, crossing gaps and layers
+
+`autocad_mcp.symbol_normalization.scale_with_connections(symbol, entities, target,
+ports, item=..., anchor=...)` plans a bounded resize from qualified block-local XY
+ports. It preserves rotation and mirror signs, matches LINE/open straight-polyline
+endpoints, and refuses a resize that would turn an orthogonal connection diagonal.
+The optional local anchor keeps that point fixed and retains attribute lettering
+through a transform patch. Review unmatched ports, junctions and lettering yourself;
+the planner does not infer equipment families or reroute a network. Its return value
+contains `operations` and the before/after port matches. Supply fresh native entities.
+
+For CTO symbols, inspect the installed DWG definition's units, base point and real
+process ports before choosing target scale. Equal insertion factors across unrelated
+definitions are not equal visible sizes. Keep proprietary CTO artwork outside this
+repository. Normalize legend samples with the adopted symbol families.
+
+`spline-gap` removes a short, explicitly selected interior interval of an open SPLINE.
+Supply its full `expected_dxf` and two ordered 3D `gap` points on the curve. The helper
+uses `command-s` inside the guarded call and verifies both resulting spline endpoints.
+Use this for an embedded crossing jumper only after identifying the true crossing;
+retain hose curvature elsewhere. A non-erase batch operation returning no handles now
+fails with `MUTATION_RETURNED_NO_HANDLES` rather than claiming an empty success.
+
+`rename_layers` accepts `drawing`, a new `journal` path, and 1–7 `pairs` of old/new
+names. It preflights all names, preserves layer objects, compares all recorded layer
+properties except name/ename, and records each rename. It does not merge layers or
+change entity overrides. Update cached entity layers before planning another edit.
+Layer `0` and `Defpoints` are reserved. Example compiler request:
+
+```json
+{"operation":"rename_layers","drawing":"C:/work/copy.dwg",
+ "journal":"C:/work/layers-01.json","pairs":[["Process","P-PIPE-MAIN"]]}
+```
+
+These operations were used in a native AutoCAD LT 2027 P&ID revision with bounded
+readback and viewport review; no automated test suite was run for this change.
+Refresh the actual view after a zoom before capturing it: `ZoomCenter` using the
+current `VIEWCTR`/`VIEWSIZE` resolved stale screenshot frames where Regen alone did
+not. Cloud replacement must account for the boundary, triangle and revision text
+handles returned by its receipt.
+
 The reusable `expected_state` helper preserves the first DXF value when codes repeat.
 `cloud_covers_bounds` checks an entire target rectangle against a cloud polygon,
 including its concave cutouts; bounding-box overlap alone is insufficient.
