@@ -1,5 +1,14 @@
 # AutoCAD MCP Server
 
+## PuranOS role and current scope
+
+This is an active drawing-automation integration used alongside the PuranOS engineering workflow. AutoCAD LT and headless DXF are distinct backends with the platform requirements below. The current guarded revision helpers operate on an explicitly identified working drawing; engineering basis, canonical equipment records and release decisions live in the wider workflow.
+
+[Sizing-to-balance, proposals and BEPs](https://github.com/puran-water/PuranOS-public/blob/main/docs/workflows.md) produce the engineering basis. [PuranOS Studio](https://github.com/puran-water/PuranOS-public/blob/main/docs/studio.md) presents retained review publications. Neither a successful CAD command nor a screenshot approves a design. This repository is maintained separately from the six-server public calculation mirror.
+
+Built by [Puran Water](https://puranwater.com/) · [Discuss engineering or a drawing workflow](https://puranwater.com/contact/).
+
+
 MCP server for AutoCAD LT automation and headless DXF generation.
 
 Two backends, one API:
