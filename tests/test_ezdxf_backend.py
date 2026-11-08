@@ -200,6 +200,49 @@ class TestEntityQuery:
         r = await backend.entity_get("NONEXISTENT")
         assert not r.ok
 
+    async def test_entity_get_lwpolyline_closed_area(self, backend):
+        cr = await backend.create_polyline([[0, 0], [10, 0], [10, 10], [0, 10]], closed=True)
+        handle = cr.payload["handle"]
+        r = await backend.entity_get(handle)
+        assert r.ok
+        assert r.payload["type"] == "LWPOLYLINE"
+        assert r.payload["closed"] is True
+        assert r.payload["points"] == [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        assert r.payload["area"] == 100.0
+        assert abs(r.payload["length"] - 40.0) < 0.01
+
+    async def test_entity_get_lwpolyline_open_no_area(self, backend):
+        cr = await backend.create_polyline([[0, 0], [10, 0], [10, 10]], closed=False)
+        handle = cr.payload["handle"]
+        r = await backend.entity_get(handle)
+        assert r.ok
+        assert r.payload["closed"] is False
+        assert "area" not in r.payload
+        assert abs(r.payload["length"] - 20.0) < 0.01
+
+    async def test_entity_get_polyline_legacy(self, backend):
+        e = backend._msp.add_polyline2d(
+            [(0, 0), (20, 0), (20, 20), (0, 20)], close=True,
+            dxfattribs={"layer": "0"},
+        )
+        r = await backend.entity_get(e.dxf.handle)
+        assert r.ok
+        assert r.payload["type"] == "POLYLINE"
+        assert r.payload["closed"] is True
+        assert r.payload["area"] == 400.0
+
+    async def test_entity_get_hatch_boundary(self, backend):
+        h = backend._msp.add_hatch()
+        h.set_pattern_fill("ANSI31", scale=1.0)
+        h.paths.add_polyline_path([(0, 0), (20, 0), (20, 20), (0, 20)], is_closed=True)
+        r = await backend.entity_get(h.dxf.handle)
+        assert r.ok
+        assert r.payload["type"] == "HATCH"
+        assert r.payload["handle"] == h.dxf.handle
+        assert len(r.payload["boundaries"]) == 1
+        assert r.payload["boundaries"][0]["area"] == 400.0
+        assert r.payload["area"] == 400.0
+
 
 # ---------------------------------------------------------------------------
 # Entity modification
