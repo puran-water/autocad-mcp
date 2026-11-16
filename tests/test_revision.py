@@ -47,29 +47,29 @@ def test_cross_process_lock_refuses_second_handle(tmp_path):
 
 
 async def test_timeout_blocks_next_dispatch_until_matching_receipt(tmp_path, monkeypatch):
-    backend = FileIPCBackend()
+    backend = FileIPCBackend(transport="legacy")
     backend._ipc_dir = tmp_path
     sent = []
 
-    def claim():
+    def claim(rid):
         sent.append(1)
-        for f in tmp_path.glob("autocad_mcp_cmd_*.json"):
-            f.unlink()
+        for f in tmp_path.glob("pcad-v2-*.ready.json"):
+            f.rename(tmp_path / f"pcad-v2-{rid}.claimed.json")
 
     monkeypatch.setattr(backend, "_type_dispatch_trigger", claim)
     first = await backend._dispatch("execute-lisp", {}, timeout=0.01)
     assert not first.ok
     pending = json.loads((tmp_path / "pcad-pending.json").read_text())
-    other = FileIPCBackend()
+    other = FileIPCBackend(transport="legacy")
     other._ipc_dir = tmp_path
     second = await other._dispatch("ping", {})
     assert second.error == "IPC_UNCERTAIN_RECONCILE_REQUIRED" and sent == [1]
     with pytest.raises(ValueError):
         acknowledge(tmp_path, pending["request_id"])
-    receipt = tmp_path / f"autocad_mcp_result_{pending['request_id']}.json"
+    receipt = tmp_path / f"pcad-v2-{pending['request_id']}.result.json"
     receipt.write_text(
         json.dumps({"request_id": pending["request_id"], "ok": True, "payload": "done"})
     )
     acknowledge(tmp_path, pending["request_id"])
     assert not (tmp_path / "pcad-pending.json").exists()
-    assert (tmp_path / "pcad-receipts" / receipt.name.replace("autocad_mcp_result_", "")).exists()
+    assert (tmp_path / "pcad-receipts" / f"{pending['request_id']}.json").exists()

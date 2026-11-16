@@ -1,10 +1,11 @@
-;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2
+;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2 / IPC v2
 ;;;
 ;;; Protocol:
-;;;   1. Python writes command JSON to C:/temp/autocad_mcp_cmd_{id}.json
-;;;   2. Python types "(c:mcp-dispatch)" + Enter
-;;;   3. This function reads cmd, dispatches via command map, writes result JSON
-;;;   4. Python polls for C:/temp/autocad_mcp_result_{id}.json
+;;;   1. Python publishes pcad-v2-{id}.ready.json and a pending intent.
+;;;   2. Python invokes mcp-dispatch-v2 with that exact request ID.
+;;;   3. Rename ready to claimed BEFORE reading; cancellation wins otherwise.
+;;;   4. Python reads the matching atomic result; all evidence is retained.
+;;; Legacy c:mcp-dispatch remains for older clients in its separate namespace.
 ;;;
 ;;; SECURITY: No raw eval — dispatcher uses a command whitelist/map.
 ;;; Compatible with AutoCAD LT 2024+.
@@ -22,7 +23,7 @@
 ;; JSON-like output helpers (minimal, no external library)
 ;; -----------------------------------------------------------------------
 
-(defun mcp-write-result (filepath request-id ok-flag payload error-msg / fp)
+(defun mcp-write-result (filepath request-id ok-flag payload error-msg / fp tmp-path)
   "Write a result JSON file. Atomic: write to .tmp then rename."
   (setq tmp-path (strcat filepath ".tmp"))
   (setq fp (open tmp-path "w"))
@@ -1357,6 +1358,51 @@
 ;; Main dispatcher — called by "(c:mcp-dispatch)" from Python
 ;; -----------------------------------------------------------------------
 
+;; Protocol 2 has a separate namespace. A legacy delayed trigger cannot consume
+;; these requests. Rename BEFORE read: only the winner of claim/cancel may run.
+(defun mcp-dispatch-v2 (request-id / prefix ready claimed result-file json-text
+                                  cmd-name result old-osmode old-cmdecho)
+  (if (and (= (type request-id) 'STR) (= (strlen request-id) 12)
+           (= "" (vl-string-trim "0123456789abcdef" request-id)))
+    (progn
+      (setq prefix (strcat *mcp-ipc-dir* "pcad-v2-" request-id)
+            ready (strcat prefix ".ready.json")
+            claimed (strcat prefix ".claimed.json")
+            result-file (strcat prefix ".result.json"))
+      (if (vl-file-rename ready claimed)
+        (progn
+          (setq json-text (mcp-read-file-lines claimed))
+          (cond
+            ((or (not json-text)
+                 (not (and (numberp (mcp-json-get-number json-text "protocol"))
+                           (= (mcp-json-get-number json-text "protocol") 2)))
+                 (not (equal (mcp-json-get-string json-text "request_id") request-id)))
+             (setq result (cons nil "IPC_INVALID_ENVELOPE")))
+            ((/= 0 (logand 1 (getvar "CMDACTIVE")))
+             (setq result (cons nil "AUTOCAD_COMMAND_ACTIVE")))
+            (T
+             (setq cmd-name (mcp-json-get-string json-text "command")
+                   old-osmode (getvar "OSMODE") old-cmdecho (getvar "CMDECHO"))
+             (setvar "OSMODE" 0)
+             (setvar "CMDECHO" 0)
+             (setq result (vl-catch-all-apply 'mcp-dispatch-command (list cmd-name json-text)))
+             ;; Only cleanup commands started by this request; entry was idle.
+             (repeat 4 (if (= 1 (logand 1 (getvar "CMDACTIVE"))) (command)))
+             (setvar "OSMODE" old-osmode)
+             (setvar "CMDECHO" old-cmdecho)
+             (if (vl-catch-all-error-p result)
+               (setq result (cons nil (vl-catch-all-error-message result))))))
+          (if (car result)
+            (mcp-write-result result-file request-id T (cdr result) nil)
+            (mcp-write-result result-file request-id nil nil (cdr result)))
+          ;; Keep claim and result as evidence, including after a Python timeout.
+        )
+      )
+    )
+  )
+  (princ)
+)
+
 (defun c:mcp-dispatch ( / cmd-files cmd-file json-text request-id cmd-name params-str result result-file old-osmode old-cmdecho)
   "Find pending command file, dispatch, write result."
   ;; Find first pending command file
@@ -1600,6 +1646,7 @@
 ;; Startup message
 ;; -----------------------------------------------------------------------
 
+(setq *mcp-ipc-protocol* 2)
 (princ (strcat "\n=== MCP Dispatch v" *mcp-version* " loaded ==="))
 (princ "\nIPC directory: ")
 (princ *mcp-ipc-dir*)

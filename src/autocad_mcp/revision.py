@@ -319,22 +319,29 @@ def unpack(result):
     try:
         payload = json.loads(result.payload)
     except (TypeError, ValueError):
-        return CommandResult(ok=False, error="INVALID_REVISION_RESPONSE", payload=result.payload)
+        return CommandResult(ok=False, error="INVALID_REVISION_RESPONSE", payload=result.payload, receipt=result.receipt)
     if isinstance(payload, dict) and payload.get("ok") is False:
-        return CommandResult(ok=False, error=payload.get("error"), payload=payload)
-    return CommandResult(ok=True, payload=payload)
+        return CommandResult(ok=False, error=payload.get("error"), payload=payload, receipt=result.receipt)
+    return CommandResult(ok=True, payload=payload, receipt=result.receipt)
 
 
 async def execute(backend, operation, data):
     if backend.name != "file_ipc":
         return CommandResult(ok=False, error="NATIVE_BACKEND_REQUIRED")
+    if operation in ('save','checkpoint') and getattr(backend, '_transport', None) == 'worker' and (operation=='checkpoint' or not data.get('path')):
+        from autocad_mcp.native_save import save_current
+        return await save_current(backend, expected=data['drawing'], file_format=data.get('format'),
+                                  copy_path=data['path'] if operation=='checkpoint' else None)
+    if operation == 'save' and getattr(backend, '_transport', None) == 'worker':
+        return await backend.worker_transition('save', data.get('path'),
+            file_format=data.get('format'), expected_drawing=data['drawing'])
     return unpack(await backend.execute_lisp(compile_call(operation, data)))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=["compile", "batch", "read", "export_page", "plot", "save", "frames"]
+        "operation", choices=["compile", "batch", "read", "export_page", "plot", "save", "checkpoint", "frames"]
     )
     parser.add_argument("request", type=Path)
     parser.add_argument("--output", type=Path)

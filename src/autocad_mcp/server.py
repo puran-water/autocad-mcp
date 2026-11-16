@@ -430,7 +430,7 @@ async def view(
     Operations:
       zoom_extents   — Zoom to show all entities.
       zoom_window    — Zoom to window: x1, y1, x2, y2 (top-level or inside data)
-      get_screenshot — Capture current view as PNG image.
+      get_screenshot — Capture PNG; data: {screenshot_path?: absolute new .png}.
     """
     backend = await get_backend()
 
@@ -447,12 +447,17 @@ async def view(
         result = await backend.zoom_window(x1, y1, x2, y2)
         return _json(result.to_dict())
     elif operation == "get_screenshot":
+        from autocad_mcp.evidence import screenshot_target, save_screenshot
+        screenshot_path = (data or {}).get("screenshot_path")
+        if screenshot_path:
+            screenshot_target(screenshot_path)
         result = await backend.get_screenshot()
         if result.ok and result.payload:
             from mcp.types import ImageContent, TextContent
 
+            evidence = save_screenshot(result.payload, screenshot_path) if screenshot_path else "attached"
             return [
-                TextContent(type="text", text=_json({"ok": True, "screenshot": "attached"})),
+                TextContent(type="text", text=_json({"ok": True, "screenshot": evidence})),
                 ImageContent(type="image", data=result.payload, mimeType="image/png"),
             ]
         return _json(result.to_dict())
@@ -480,14 +485,22 @@ async def system(
       get_backend   — Return current backend name and capabilities.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
-      revision      — Journaled native batch/read/export_page/frames/plot/save. data: {action, drawing, ...}
-      desktop       — Read Windows window/dialog state and pending IPC receipt.
-      acknowledge   — Acknowledge reconciled late completion. data: {request_id}
+      revision      — Journaled native batch/read/export_page/frames/plot/save/checkpoint. data: {action, drawing, ...}
+      desktop       — Read Windows state/pending receipt without IPC init; data: {screenshot_path?}.
+      worker        — File queue lifecycle. data: {action: observe|prepare|stop|renew, drawing?, session?}. Renew saves and renews the same document; others bypass IPC init.
+      job           — Isolated AutoCAD LT job. launch: {action, drawing, ipc_dir, executable}; observe/attach/close: {action, path: absolute job.json}. No keyboard input; close saves first.
+      acknowledge   — Acknowledge reconciled completion or proven v2 cancellation. data: {request_id}
       execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
+
+    revision/execute_lisp accept data.screenshot_path (new absolute PNG); saved evidence
+    includes bytes/hash. include_screenshot also attaches the image. No mutation retry.
     """
     data = data or {}
 
-    if operation == "status" or operation == "get_backend":
+    if operation == "job":
+        from autocad_mcp.native_job import manage
+        return _json(await manage(data))
+    elif operation == "status" or operation == "get_backend":
         backend = await get_backend()
         result = await backend.status()
         return await add_screenshot_if_available(result, include_screenshot)
@@ -501,6 +514,7 @@ async def system(
     elif operation == "runtime":
         import os
         import sys
+        from autocad_mcp.build import LOADED, manifest, qualification
 
         return _json(
             {
@@ -508,6 +522,12 @@ async def system(
                 "platform": sys.platform,
                 "python": sys.executable,
                 "cwd": os.getcwd(),
+                "pid": os.getpid(),
+                "module": __file__,
+                "native_transport_build": "queue-worker-v1",
+                "loaded_build": LOADED['sha256'],
+                "disk_build": manifest()['sha256'],
+                "native_qualification": qualification(),
                 "backend_env": os.environ.get("AUTOCAD_MCP_BACKEND", "auto"),
                 "wsl_interop": bool(os.environ.get("WSL_INTEROP")),
             }
@@ -521,27 +541,46 @@ async def system(
         return _json(result.to_dict())
     elif operation == "revision":
         from autocad_mcp.revision import execute
+        from autocad_mcp.evidence import screenshot_target
+        data = dict(data)
+        screenshot_path = data.pop("screenshot_path", None)
+        if screenshot_path:
+            screenshot_target(screenshot_path)
         backend = await get_backend()
         result = await execute(backend, data.pop("action"), data)
-        return await add_screenshot_if_available(result, include_screenshot)
+        return await add_screenshot_if_available(result, include_screenshot, screenshot_path)
+    elif operation == "worker":
+        from autocad_mcp.worker_control import control
+        from autocad_mcp.config import detect_backend, IPC_DIR, LISP_DIR
+        if detect_backend() != 'file_ipc':
+            return _json({'ok':False,'error':'NATIVE_BACKEND_REQUIRED'})
+        if data.get('action') == 'renew':
+            backend = await get_backend()
+            result = await backend.worker_transition('save')
+            return _json(result.to_dict())
+        return _json({'ok':True,'payload':control(IPC_DIR, data.get('action','observe'), data, LISP_DIR)})
     elif operation == "desktop":
-        from autocad_mcp.desktop import observe, inspect_pending
-        backend = await get_backend()
-        if backend.name != "file_ipc":
+        from autocad_mcp.desktop import diagnostics
+        from autocad_mcp.config import detect_backend, IPC_DIR
+        if detect_backend() != "file_ipc":
             return _json({"ok": False, "error": "NATIVE_BACKEND_REQUIRED"})
-        return _json({"desktop": observe(backend._hwnd), "ipc": inspect_pending(backend._ipc_dir)})
+        return _json(diagnostics(IPC_DIR, data.get("screenshot_path")))
     elif operation == "acknowledge":
         from autocad_mcp.desktop import acknowledge
-        backend = await get_backend()
-        if backend.name != "file_ipc":
+        from autocad_mcp.config import detect_backend, IPC_DIR
+        if detect_backend() != "file_ipc":
             return _json({"ok": False, "error": "NATIVE_BACKEND_REQUIRED"})
-        return _json(acknowledge(backend._ipc_dir, data["request_id"]))
+        return _json(acknowledge(IPC_DIR, data["request_id"]))
     elif operation == "execute_lisp":
+        from autocad_mcp.evidence import screenshot_target
+        screenshot_path = data.get("screenshot_path")
+        if screenshot_path:
+            screenshot_target(screenshot_path)
         backend = await get_backend()
         if not data.get("code"):
             return _json({"error": "data.code is required"})
         result = await backend.execute_lisp(data["code"])
-        return await add_screenshot_if_available(result, include_screenshot)
+        return await add_screenshot_if_available(result, include_screenshot, screenshot_path)
     else:
         return _json({"error": f"Unknown system operation: {operation}"})
 
