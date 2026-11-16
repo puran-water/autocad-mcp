@@ -94,8 +94,20 @@
   (setq result "")
   (if (member (cdr (assoc 0 d)) '("TEXT" "MTEXT" "ATTRIB" "ATTDEF"))
     (foreach p d (if (member (car p) '(1 3)) (setq result (strcat result (cdr p)))))) result)
+(defun pcad:core-dxf (d / depth out p)
+  ;; Group 102 application sections may contain reactor 330 handles before the
+  ;; entity owner. Keep raw DXF intact, but ignore those sections for property reads.
+  (setq depth 0 out nil)
+  (foreach p d
+    (cond
+      ((= (car p) 102)
+        (cond
+          ((= (substr (cdr p) 1 1) "{") (setq depth (1+ depth)))
+          ((= (cdr p) "}") (setq depth (1- depth)))))
+      ((= depth 0) (setq out (cons p out)))))
+  (reverse out))
 (defun pcad:entity (e / d typ)
-  (setq d (entget e) typ (cdr (assoc 0 d)))
+  (setq d (pcad:core-dxf (entget e)) typ (cdr (assoc 0 d)))
   (pcad:obj (list (cons "handle" (cdr (assoc 5 d))) (cons "type" typ)
     (cons "layer" (cdr (assoc 8 d))) (cons "space" (cdr (assoc 410 d)))
     (cons "owner" (cdr (assoc 330 d))) (cons "bbox" (pcad:box e))
@@ -161,7 +173,7 @@
 (defun pcad:require (test message) (if (not test) (pcad:fail message)))
 (defun pcad:checked (op / e d actual)
   (setq e (handent (pcad:g "handle" op)))
-  (pcad:require e "HANDLE_MISSING") (setq d (entget e))
+  (pcad:require e "HANDLE_MISSING") (setq d (pcad:core-dxf (entget e)))
   (pcad:require (pcad:g "expect" op) "EXPECTED_STATE_REQUIRED")
   (foreach p (pcad:g "expect" op)
     (setq actual (cdr (assoc (car p) d)))

@@ -55,7 +55,7 @@ def observe(hwnd):
 
     def collect(window, _):
         if (
-            win32gui.IsWindowVisible(window)
+            (win32gui.IsWindowVisible(window) or win32gui.GetClassName(window) == "#32770")
             and win32process.GetWindowThreadProcessId(window)[1] == pid
         ):
             windows.append(
@@ -64,6 +64,7 @@ def observe(hwnd):
                     title=win32gui.GetWindowText(window),
                     class_name=win32gui.GetClassName(window),
                     enabled=bool(win32gui.IsWindowEnabled(window)),
+                    visible=bool(win32gui.IsWindowVisible(window)),
                 )
             )
         return True
@@ -79,30 +80,73 @@ def observe(hwnd):
 
 
 def inspect_pending(directory):
+    from autocad_mcp.ipc_protocol import PROTOCOL, cancellation_proof, paths, read_json
+
     path = Path(directory) / "pcad-pending.json"
     if not path.exists():
         return {"pending": None}
     pending = json.loads(path.read_text())
     result = Path(directory) / f"autocad_mcp_result_{pending['request_id']}.json"
+    details = {}
+    if pending.get("protocol") == PROTOCOL:
+        files = paths(Path(directory), pending["request_id"])
+        result = files["result"]
+        details = {"protocol": PROTOCOL, "claimed": files["claimed"].exists(),
+                   "cancelled_before_claim": cancellation_proof(Path(directory), pending)}
     receipt = None
     if result.exists():
         try:
-            receipt = json.loads(result.read_text(encoding="utf-8-sig"), strict=False)
+            receipt = read_json(result)
         except (ValueError, UnicodeError):
             pass
-    return {"pending": pending, "receipt": receipt}
+    if pending.get("protocol") == PROTOCOL:
+        try:
+            details["completion_claim_verified"] = read_json(files["claimed"]) == pending
+        except (OSError, ValueError):
+            details["completion_claim_verified"] = False
+    return {"pending": pending, "receipt": receipt, **details}
+
+
+def diagnostics(directory, screenshot_path=None):
+    """Recovery observation must not initialize or dispatch to AutoCAD."""
+    from autocad_mcp.backends.file_ipc import find_autocad_window
+    from autocad_mcp.evidence import screenshot_target, save_screenshot
+    import base64
+    import io
+    from PIL import ImageGrab
+
+    if screenshot_path:
+        screenshot_target(screenshot_path)
+    state = {"ipc": inspect_pending(directory)}
+    hwnd = find_autocad_window()
+    if not hwnd:
+        return {**state, "ok": False, "error": "AUTOCAD_WINDOW_MISSING"}
+    state.update(ok=True, desktop=observe(hwnd))
+    if screenshot_path:
+        try:
+            # A rendered frame alone omits owned dialogs and floating command
+            # history. Recovery needs the actual desktop, including those windows.
+            output = io.BytesIO()
+            ImageGrab.grab(all_screens=True).save(output, format="PNG")
+            data = base64.b64encode(output.getvalue()).decode("ascii")
+            state["screenshot"] = save_screenshot(data, screenshot_path)
+            state["screenshot"]["capture"] = "desktop_all_screens"
+        except Exception as exc:
+            state["screenshot_error"] = str(exc)
+    return state
 
 
 def acknowledge(directory, request_id):
-    """Acknowledge a reconciled COMPLETE native result, preserving it in the archive."""
+    """Acknowledge exact completion or proven v2 cancellation, retaining evidence."""
     with ipc_lease(directory):
         state = inspect_pending(directory)
         pending, receipt = state["pending"], state["receipt"]
         if (
             not pending
             or pending["request_id"] != request_id
-            or not receipt
-            or receipt.get("request_id") != request_id
+            or not ((receipt and receipt.get("request_id") == request_id
+                     and state.get("completion_claim_verified", True))
+                    or state.get("cancelled_before_claim"))
         ):
             raise ValueError("MATCHING_COMPLETION_RECEIPT_REQUIRED")
         archive = Path(directory) / "pcad-receipts"

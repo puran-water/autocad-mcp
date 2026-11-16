@@ -39,16 +39,39 @@ cd autocad-mcp
 uv sync
 ```
 
-### 2. Load the LISP dispatcher in AutoCAD LT
+### 2. Use an isolated document job
 
-Open AutoCAD LT and load `mcp_dispatch.lsp` using **APPLOAD**:
+The native backend uses a resident AutoLISP file queue. It does not type each command
+or steal foreground focus. Load the Python and Lisp files from the same
+build; `system.runtime` reports the exact loaded/disk hashes and qualification.
+A build without a matching `native-qualification.json` reports `different_build` or
+`unqualified`: qualify it on a disposable drawing ([queue workflow](docs/queue-workflow.md))
+before production use. Automatic document switching and DXF transitions are not supported.
 
-1. Type `APPLOAD` in the AutoCAD command line
-2. Browse to `<repo>/lisp-code/mcp_dispatch.lsp`
-3. Click **Load**
-4. You should see: `=== MCP Dispatch v3.1 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
+From WSL, `scripts/run-native-wsl.py` starts
+`%USERPROFILE%\mcp-servers\autocad-mcp\run-native-ready.cmd`, which calls a
+`run-native.cmd` you place beside it to start the Windows server.
 
-> **Tip:** Add the file to your AutoCAD Startup Suite (in the APPLOAD dialog) so it loads automatically with every drawing.
+Start MCP first, then use `system` with `operation="job"`:
+
+```json
+{"action":"launch","drawing":"C:/work/revision.dwg",
+ "ipc_dir":"C:/work/ipc-job-001",
+ "executable":"C:/Program Files/Autodesk/AutoCAD LT 2027/acadlt.exe"}
+```
+
+The drawing must be an existing writable working copy, not already open. The IPC
+directory must be new. The launcher starts a separate process with a startup script;
+it never switches documents in an AutoCAD process you already have open. Poll `action="observe"`
+with `path="<ipc_dir>/job.json"`, then `action="attach"` when the native
+worker is idle. The record is `<ipc_dir>/job.json`. A second MCP process can explicitly
+attach to this same job after a server restart. Do not launch a second copy on timeout.
+Missing fonts or other startup dialogs are reported for deliberate resolution.
+
+For a drawing already open in your own session, `system.worker prepare` can produce a one-use
+bootstrap SCRIPT. This is a deliberate handoff, not an automatic keyboard fallback.
+Keep one authoritative working DWG and reconcile unsaved changes before choosing
+between an existing document and a new process.
 
 ### 3. Configure your MCP client
 
@@ -148,10 +171,13 @@ python -m autocad_mcp.revision compile request.json \
 ```
 
 Keep the Python compiler and Windows LISP helper at the same repository revision.
-Native revision `save` defaults to AutoCAD 2010 (`format:48`) and honors the format
-even when `path` is omitted. It saves the verified active copy in that case;
-an explicit new destination must not exist. Verify `AC1024` in the saved DWG header.
-The ordinary `drawing.save`/QSAVE tool follows the application's save defaults.
+In worker mode, `revision.save` and `drawing.save` preserve the existing on-disk DWG
+format by default (AC1024, AC1027 or AC1032); an explicit format is verified afterward.
+`revision.checkpoint` takes a new `path`, saves in place, then atomically copies and
+hashes the saved bytes without changing the active document. Existing recovery files
+are never overwritten. A copy error after a successful save reports that distinction.
+Explicit Save As uses a guarded same-document worker handoff; automatic OPEN and DXF
+transitions remain disabled. Do not infer their safety from a successful save.
 
 Guarded revision patches can set an entity's linetype (DXF 6) and linetype scale
 (DXF 48), for example electrical signal lines in a P&ID. The linetype must already
@@ -312,7 +338,7 @@ Python MCP Server (autocad_mcp)
     └── ezdxf Backend ──► in-memory DXF (headless, no AutoCAD needed)
 ```
 
-The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMessageW(WM_CHAR)`, triggering the `(c:mcp-dispatch)` AutoLISP command. This approach does **not** steal window focus — you can continue working in other applications while automation runs.
+The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMessageW(WM_CHAR)`, invoking `(mcp-dispatch-v2 "<request-id>")` for one specific request. The target is rediscovered and validated on each dispatch, and Windows delivery errors are reported. This approach does **not** steal window focus — you can continue working in other applications while automation runs.
 
 ## Environment Variables
 
@@ -322,7 +348,7 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 | `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
 | `AUTOCAD_MCP_IPC_TIMEOUT` | `30.0` | IPC command timeout in seconds (1-300) |
 | `AUTOCAD_MCP_IPC_LONG_TIMEOUT` | `120.0` | Timeout for `execute_lisp` and plotting (up to 600) |
-| `AUTOCAD_MCP_AUTOLOAD` | `1` | Load `mcp_dispatch.lsp` into the active drawing when it does not answer (`0` to disable) |
+| `AUTOCAD_MCP_AUTOLOAD` | `1` | Load `mcp_dispatch.lsp` in the active document before its first v2 request (`0` requires manual preload) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
 
 > **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
@@ -369,8 +395,47 @@ uncertain completion hold.
 - **ESC prefix** — Sends 2x ESC before each dispatch to cancel stale pending commands from prior timeouts.
 - **UTF-8/cp1252 fallback** — Handles non-ASCII characters in LISP result files (AutoCAD writes Windows-1252).
 - **Configurable IPC timeout** — `AUTOCAD_MCP_IPC_TIMEOUT` env var (1–300 seconds, default 30); `execute_lisp` and plotting use `AUTOCAD_MCP_IPC_LONG_TIMEOUT` (default 120).
-- **Dispatcher autoload** — `mcp_dispatch.lsp` is loaded per drawing. When a command is not picked up within 3 s (new drawing tab, dispatcher never loaded), the server loads it into the active drawing and runs that same command; a command that was picked up is never re-sent. Disable with `AUTOCAD_MCP_AUTOLOAD=0`.
+- **Dispatcher autoload** — `mcp_dispatch.lsp` is loaded per drawing. The v2 trigger loads it before dispatch in a document that lacks protocol 2. There is no automatic second trigger or command replay. Disable with `AUTOCAD_MCP_AUTOLOAD=0`.
 - **Thread-safe backend init** — `asyncio.Lock` prevents parallel initialization races.
+
+### File IPC v2 recovery
+
+Deploy `src/autocad_mcp` and `lisp-code/mcp_dispatch.lsp` together and restart the
+Python MCP process. V2 uses `pcad-v2-<id>.ready.json`, `.claimed.json`,
+`.cancelled.json` and `.result.json`; legacy wildcard dispatchers cannot consume
+these files. AutoLISP claims by same-directory rename **before reading**. Python
+can instead rename ready to cancelled. Only the winning rename authorizes execution.
+A delayed trigger names its old ID and cannot run a newer request.
+
+`pcad-pending.json` fences subsequent clients until completion or reconciliation.
+On `IPC_NOT_PICKED_UP_CANCELLED`, stop edits and inspect `system.desktop` and its
+screenshot. `cancelled_before_claim: true` is verifiable non-execution evidence;
+`system.acknowledge` with the exact ID can preserve it and release the fence.
+It does not automatically resend a request or clear partially typed input. If the
+claim exists, reconcile native handles and the matching late result before
+acknowledgement. Missing files alone are never evidence of non-execution.
+Legacy pending markers still need explicit recovery; their old read/delete protocol
+cannot supply a v2 cancellation proof. Retain them with the recovery record.
+
+Windows process launch failures from WSL (`UtilAcceptVsock ... accept4 failed 110`)
+are a different transport layer. Preserve the pending receipt and check interop and
+kernel logs; do not use AutoCAD retries to diagnose WSL. See `docs/ipc-v2.md` for
+protocol invariants, deployment/rollback and qualification status.
+
+## Reliable execution
+
+Bounded edit/readback/screenshot batches and automatic recovery saves are execution
+checks, not review gates.
+
+Keep one Windows MCP process alive for the job. `system.job launch/attach/close`
+runs on Windows without additional WSL process launches. `close` saves first and
+requires a stopped worker and DBMOD=0. It never discards unsaved changes or kills an
+unrelated AutoCAD process. `system.worker renew` renews the same document at a safe
+boundary. Request uncertainty stops mutations; no timeout is automatically replayed.
+
+The [queue workflow](docs/queue-workflow.md) documents qualification and operational
+limits. Earlier keyboard-trigger qualification in `docs/ipc-v2.md` is historical;
+it does not qualify the current worker build.
 
 ## License
 

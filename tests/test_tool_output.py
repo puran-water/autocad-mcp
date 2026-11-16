@@ -23,13 +23,14 @@ async def test_tools_do_not_emit_structured_output():
 @pytest.mark.asyncio
 async def test_result_with_raw_newline_is_parsed(tmp_path: Path):
     """A multi-line LISP result must not make the poll loop wait for the timeout."""
-    backend = FileIPCBackend()
+    backend = FileIPCBackend(transport="legacy")
     backend._ipc_dir = tmp_path
 
-    def trigger():
-        cmd = json.loads(next(tmp_path.glob("autocad_mcp_cmd_*.json")).read_text(encoding="utf-8"))
+    def trigger(rid):
+        cmd = json.loads(next(tmp_path.glob("pcad-v2-*.ready.json")).read_text(encoding="utf-8"))
         rid = cmd["request_id"]
-        (tmp_path / f"autocad_mcp_result_{rid}.json").write_text(
+        next(tmp_path.glob("pcad-v2-*.ready.json")).rename(tmp_path / f"pcad-v2-{rid}.claimed.json")
+        (tmp_path / f"pcad-v2-{rid}.result.json").write_text(
             '{"request_id":"%s","ok":false,"error":"line one\nline two"}' % rid, encoding="utf-8"
         )
 

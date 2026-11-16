@@ -1,0 +1,43 @@
+{
+  "state": "qualified",
+  "build": "226084b7a20f5b9439cfc92394f8793ea241ac70b1aa2ba717fe6a94dcc46b9c",
+  "application": "AutoCAD LT 2027",
+  "date": "2026-11-07",
+  "scope": [
+    "managed_job_launch_attach_close",
+    "same_document_worker_renewal",
+    "native_read_and_bounded_journaled_edit",
+    "native_readback_and_screenshot",
+    "in_place_save_format_preservation",
+    "exclusive_hash_verified_recovery_copy",
+    "MCP_disconnect_reconnect_survival",
+    "minimized_window_reads",
+    "claimed_timeout_fencing_and_reconciliation",
+    "native_page_setup_A3_plot"
+  ],
+  "excluded": [
+    "automatic_document_switching",
+    "DXF_transition",
+    "font_completeness_or_engineering_approval",
+    "WSL_kernel_memory_repair"
+  ],
+  "tests": {
+    "pytest": 299,
+    "native": {
+      "build": "226084b7a20f5b9439cfc92394f8793ea241ac70b1aa2ba717fe6a94dcc46b9c",
+      "calls": 157,
+      "batches": 52,
+      "native_edits": 110,
+      "caller_timeout_counter": 1,
+      "native_timeout_counter": 1,
+      "foreground_independent_reads": 20,
+      "clean_reconnect": true,
+      "clean_close": true,
+      "harness_corrections": [
+        "expected error label WRONG_DOCUMENT",
+        "execute_lisp uses printed Lisp strings",
+        "caller timeout can complete and archive in server; native timeout tested separately"
+      ]
+    }
+  }
+}
