@@ -59,7 +59,8 @@ def scale_with_connections(symbol, entities, target, ports, *, item, tolerance=0
     def transform(port, scale, origin):
         px, py = offset(port, scale)
         return [origin[0]+px, origin[1]+py, z]
-    patches = {}; matches = []
+    patches = {}
+    matches = []
     for port in ports:
         old, new = transform(port, abs(sx), [x,y,z]), transform(port, target, base)
         found = []
@@ -96,12 +97,15 @@ def scale_with_connections(symbol, entities, target, ports, *, item, tolerance=0
                       41:math.copysign(target,sx),42:math.copysign(target,sy),
                       43:math.copysign(target,sz)})
     for h,p in patches.items():
-        e=p['entity'];exp=expected_state(e)
+        e=p['entity']
+        exp=expected_state(e)
         if e['type']=='LINE':
-            d=dict(reversed(e['dxf']));exp.update({k:d[k] for k in p['set']})
+            d=dict(reversed(e['dxf']))
+            exp.update({k:d[k] for k in p['set']})
             ops.append(dict(item=item,kind='patch',handle=h,expect=exp,set=p['set']))
         else:
-            old=[v for k,v in e['dxf'] if k==10];new=[p['points'].get(i,v) for i,v in enumerate(old)]
+            old=[v for k,v in e['dxf'] if k==10]
+            new=[p['points'].get(i,v) for i,v in enumerate(old)]
             ops.append(dict(item=item,kind='vertices',handle=h,expect=exp,expected_points=old,points=new))
     if len(ops)>7:
         raise ValueError('BATCH_SIZE_EXCEEDED_RECOMPOSE_REQUIRED')
