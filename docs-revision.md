@@ -5,7 +5,7 @@ uses the File IPC backend. The eight MCP tool names are unchanged. Reconnect an 
 server process to acquire the new operations. The same implementation is available as
 `python -m autocad_mcp.revision ACTION request.json --output receipt.json` on Windows.
 
-Actions: `read` (1–100 handles), `export_page` (1–500 records, offset, definitions flag),
+Actions: `preflight` (drawing resource inventory), `read` (1–100 handles), `export_page` (1–500 records, offset, definitions flag),
 `frames` (activate layouts for valid viewport IDs), `batch`, `plot`, `save`.
 Each export page ends with a completion/count record; a complete snapshot requires
 all contiguous pages from one unchanged drawing, including the definition pages.
@@ -66,7 +66,27 @@ Inspect any interrupted entry and created handles before proceeding; never repla
 batch with a different journal path to bypass duplicate protection. Take and inspect
 a screenshot after each batch. Verify saved results independently.
 
+`preflight` reports each layout's `style_status` (`available`, `missing`,
+`unverified`, or `not_required`) and each text style's requested font/bigfont,
+resolved paths and status. Extensionless SHX/TTF names are checked with their
+extensions; Windows system and per-user Fonts directories are also checked for
+bare TrueType filenames. An unresolved font is evidence to investigate, not proof it is used
+on the plotted sheet: unused styles are included, and font mapping, embedded
+MTEXT overrides, shape linetypes and substituted glyph fidelity are not qualified.
+
 `plot` uses a named `layout` and a new `path`, preserving its PC3/media/CTB settings.
+Before plotting it checks an enabled, assigned CTB/STB against AutoCAD's refreshed
+plot-style catalog, not `findfile` (plot-style search paths can differ). Missing
+styles fail with `PLOT_STYLE_MISSING`; a catalog that cannot be queried fails with
+`PLOT_STYLE_UNVERIFIED`. Neither case creates an output. Restore the resource or
+deliberately change the layout setting before retrying. Disabled/unassigned styles
+do not block. The receipt includes font evidence and `rendering_verified: false`;
+a nonempty PDF is not proof of correct fonts, lineweights or glyphs.
+
+`layer.create` leaves an existing layer unchanged, even if color/linetype arguments
+are supplied, and returns `created: false, existed: true`. Use `layer.set_properties`
+for intentional restyling. This matches the headless backend's no-op behavior.
+
 `save` honors `format` with or without a new `path`; its default `48` writes
 AutoCAD 2010. Omitting `path` saves the verified active copy through `SaveAs` with
 that format. An explicit destination must not already exist. Verify the saved

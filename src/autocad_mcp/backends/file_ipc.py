@@ -1,4 +1,4 @@
-"""AutoCAD LT File IPC v2: request-specific trigger and atomic claim/cancel.
+"""AutoCAD LT File IPC v3: request-specific trigger and atomic claim/cancel.
 
 A new document loads the dispatcher before the first request, not after a failed
 pickup. Requests are never automatically replayed. Claimed timeouts retain intent;
@@ -260,7 +260,7 @@ class FileIPCBackend(AutoCADBackend):
                     try:
                         data = read_json(files["result"])
                         if data.get("request_id") == request_id:
-                            # A v2 result alone is not enough: require its original claim.
+                            # A v3 result alone is not enough: require its original claim.
                             if (
                                 not files["claimed"].exists()
                                 or read_json(files["claimed"]) != payload
@@ -285,8 +285,8 @@ class FileIPCBackend(AutoCADBackend):
                 elapsed = time.monotonic() - start
                 claimed = files["claimed"].exists()
                 if time.monotonic() >= deadline or (not claimed and elapsed >= PICKUP_TIMEOUT):
-                    # Rename competes with the dispatcher's rename-before-read. Never
-                    # delete READY: a disappearance without proof is still uncertain.
+                    # Claim and cancellation compete for one exclusive decision directory.
+                    # A disappearance without proof is still uncertain.
                     cancelled = cancel_unclaimed(self._ipc_dir, request_id)
                     receipt = {
                         "request_id": request_id,
@@ -320,10 +320,10 @@ class FileIPCBackend(AutoCADBackend):
         # A distinct filename namespace prevents legacy wildcard dispatchers from
         # consuming v2 requests, including delayed triggers from an old client.
         path = self._lisp_path.replace('"', '\\"')
-        expression = f'(mcp-dispatch-v2 "{request_id}")'
+        expression = f'(mcp-dispatch-v3 "{request_id}")'
         if AUTOLOAD_DISPATCHER:
             expression = (
-                f'(progn (if (not (equal *mcp-ipc-protocol* 2)) (load "{path}")) {expression})'
+                f'(progn (if (not (equal *mcp-ipc-protocol* 3)) (load "{path}")) {expression})'
             )
         return self._post_text(expression)
 

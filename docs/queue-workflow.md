@@ -31,8 +31,12 @@ open is reported for inspection. Existing user windows are not job targets.
 
 ## Recovery and cadence
 
-All native requests use an OS lease plus an asynchronous lock. A request is atomically
-claimed before it executes. Cancellation can prove no claim; claimed timeouts retain
+All native requests use an OS lease plus an asynchronous lock. Protocol 3 arbitrates
+claim versus cancellation with an exclusively created per-request `.decision`
+directory before moving the envelope. Competing renames alone can both succeed on
+Windows; a post-rename existence check does not close that race. The decision
+directory is retained permanently. A crash or move failure after acquiring it stays
+uncertain and cannot be reclaimed. Cancellation can prove no claim; claimed timeouts retain
 the original intent. Read matching late receipts and actual handles before explicit
 acknowledgement. The server never retries a mutation. A successful error envelope
 retains its payload and receipt, so callers can distinguish saved/partially completed
@@ -42,6 +46,11 @@ Completed pending markers may disappear between the worker's existence check and
 read. The worker treats that as normal archival, not a nil request. A sustained
 native test found this race; release qualification must exercise repeated
 completion/archival and reconnects, not just a few successful pings.
+
+Finish or reconcile old jobs with their matching build before upgrading. Restart
+both Windows Python and AutoCAD's worker with the new build and a fresh job directory.
+Protocol 3 uses `pcad-v3-*` and `mcp-dispatch-v3`; a delayed protocol-2 dispatcher
+cannot consume these requests. Do not rename old envelopes into the new namespace.
 
 `revision.checkpoint` saves in place and makes a new hash-verified recovery copy.
 The active DWG never changes, avoiding Save As/open cycles. Automatic recovery

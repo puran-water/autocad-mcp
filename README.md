@@ -203,6 +203,14 @@ human edits. On timeout, reconcile the pending receipt and actual drawing before
 retry; newer clients hold dispatch until explicit acknowledgement. Older running
 clients need reconnecting to acquire the process lease and new operation schema.
 
+Before issuing a native plot, call `system` with `operation="revision"` and
+`data={"action":"preflight","drawing":"C:/work/copy.dwg"}`. It reports font
+resolution and AutoCAD's available CTB/STB tables. `revision.plot` refuses an enabled,
+assigned plot style that is missing or cannot be verified. It does not substitute
+fonts or plot styles automatically. Inspect the resulting PDF; resource availability
+alone does not qualify its appearance. Creating an already-present layer is a no-op;
+use `layer.set_properties` when a deliberate appearance change is required.
+
 ### Consistent symbols, crossing gaps and layers
 
 `autocad_mcp.symbol_normalization.scale_with_connections(symbol, entities, target,
@@ -338,7 +346,7 @@ Python MCP Server (autocad_mcp)
     └── ezdxf Backend ──► in-memory DXF (headless, no AutoCAD needed)
 ```
 
-The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMessageW(WM_CHAR)`, invoking `(mcp-dispatch-v2 "<request-id>")` for one specific request. The target is rediscovered and validated on each dispatch, and Windows delivery errors are reported. This approach does **not** steal window focus — you can continue working in other applications while automation runs.
+The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMessageW(WM_CHAR)`, invoking `(mcp-dispatch-v3 "<request-id>")` for one specific request. The target is rediscovered and validated on each dispatch, and Windows delivery errors are reported. This approach does **not** steal window focus — you can continue working in other applications while automation runs.
 
 ## Environment Variables
 
@@ -395,16 +403,17 @@ uncertain completion hold.
 - **ESC prefix** — Sends 2x ESC before each dispatch to cancel stale pending commands from prior timeouts.
 - **UTF-8/cp1252 fallback** — Handles non-ASCII characters in LISP result files (AutoCAD writes Windows-1252).
 - **Configurable IPC timeout** — `AUTOCAD_MCP_IPC_TIMEOUT` env var (1–300 seconds, default 30); `execute_lisp` and plotting use `AUTOCAD_MCP_IPC_LONG_TIMEOUT` (default 120).
-- **Dispatcher autoload** — `mcp_dispatch.lsp` is loaded per drawing. The v2 trigger loads it before dispatch in a document that lacks protocol 2. There is no automatic second trigger or command replay. Disable with `AUTOCAD_MCP_AUTOLOAD=0`.
+- **Dispatcher autoload** — `mcp_dispatch.lsp` is loaded per drawing. The v3 trigger loads it before dispatch in a document that lacks protocol 3. There is no automatic second trigger or command replay. Disable with `AUTOCAD_MCP_AUTOLOAD=0`.
 - **Thread-safe backend init** — `asyncio.Lock` prevents parallel initialization races.
 
-### File IPC v2 recovery
+### File IPC v3 recovery
 
 Deploy `src/autocad_mcp` and `lisp-code/mcp_dispatch.lsp` together and restart the
-Python MCP process. V2 uses `pcad-v2-<id>.ready.json`, `.claimed.json`,
-`.cancelled.json` and `.result.json`; legacy wildcard dispatchers cannot consume
-these files. AutoLISP claims by same-directory rename **before reading**. Python
-can instead rename ready to cancelled. Only the winning rename authorizes execution.
+Python MCP process. V3 uses `pcad-v3-<id>.ready.json`, `.claimed.json`,
+`.cancelled.json` and `.result.json`; old dispatchers cannot consume these files.
+Both claim and cancellation must first exclusively create `<prefix>.decision`.
+Only its creator may move the ready envelope. Keep that directory even after a
+crash or move failure; competing renames alone can both succeed on Windows.
 A delayed trigger names its old ID and cannot run a newer request.
 
 `pcad-pending.json` fences subsequent clients until completion or reconciliation.
@@ -415,12 +424,14 @@ It does not automatically resend a request or clear partially typed input. If th
 claim exists, reconcile native handles and the matching late result before
 acknowledgement. Missing files alone are never evidence of non-execution.
 Legacy pending markers still need explicit recovery; their old read/delete protocol
-cannot supply a v2 cancellation proof. Retain them with the recovery record.
+cannot supply a v3 cancellation proof. Reconcile old jobs with their matching build
+before upgrading, then start fresh jobs. Retain old evidence; never rename it into v3.
 
 Windows process launch failures from WSL (`UtilAcceptVsock ... accept4 failed 110`)
 are a different transport layer. Preserve the pending receipt and check interop and
-kernel logs; do not use AutoCAD retries to diagnose WSL. See `docs/ipc-v2.md` for
-protocol invariants, deployment/rollback and qualification status.
+kernel logs; do not use AutoCAD retries to diagnose WSL. See
+`docs/queue-workflow.md` for current deployment and qualification requirements.
+`docs/ipc-v2.md` retains the historical rename-only protocol, superseded by v3.
 
 ## Reliable execution
 

@@ -1,7 +1,7 @@
 ;;; Resident File IPC worker candidate. No keyboard input between requests.
 ;;; Start explicitly in an idle document: (mcp-worker-run "<session token>").
 ;;; This owns the AutoCAD command processor until stopped or interrupted.
-;;; mcp_dispatch.lsp (protocol 2) must already be loaded.
+;;; mcp_dispatch.lsp (protocol 3) must already be loaded.
 
 (defun mcp-worker-json-file (path json / fp tmp)
   ;; Heartbeats alternate slots: deleting one never removes the other snapshot.
@@ -57,7 +57,7 @@
     ((not (and (= (type token) 'STR) (= (strlen token) 32)
                (= "" (vl-string-trim "0123456789abcdef" token))))
      (princ "\nMCP_WORKER_INVALID_SESSION"))
-    ((not (equal *mcp-ipc-protocol* 2)) (princ "\nMCP_WORKER_DISPATCHER_REQUIRED"))
+    ((not (equal *mcp-ipc-protocol* 3)) (princ "\nMCP_WORKER_DISPATCHER_REQUIRED"))
     (T
      (setq *mcp-worker-token* token
            *mcp-worker-prefix* (strcat *mcp-ipc-dir* "pcad-worker-" token)
@@ -124,7 +124,7 @@
                                   (= "" (vl-string-trim "0123456789abcdef" *mcp-worker-request*))))
                         (setq stop-reason "INVALID_REQUEST_ID"))
                        (T
-                        (setq files (strcat *mcp-ipc-dir* "pcad-v2-" *mcp-worker-request*)
+                        (setq files (strcat *mcp-ipc-dir* "pcad-v3-" *mcp-worker-request*)
                               ready (strcat files ".ready.json"))
                         (if (findfile ready)
                           (cond
@@ -135,7 +135,7 @@
                              (setq stop-reason "REQUEST_DRAWING_MISMATCH"))
                             (T
                              (mcp-worker-heartbeat "running" "")
-                             (mcp-dispatch-v2 *mcp-worker-request*)
+                             (mcp-dispatch-v3 *mcp-worker-request*)
                              (setq last-work (getvar "MILLISECS")
                                    result (strcat files ".result.json"))
                              (cond

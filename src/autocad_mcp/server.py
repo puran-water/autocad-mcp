@@ -485,7 +485,7 @@ async def system(
       get_backend   — Return current backend name and capabilities.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
-      revision      — Journaled native batch/read/export_page/frames/plot/save/checkpoint. data: {action, drawing, ...}
+      revision      — Native preflight/batch/read/export_page/frames/plot/save/checkpoint. data: {action, drawing, ...}
       desktop       — Read Windows state/pending receipt without IPC init; data: {screenshot_path?}.
       worker        — File queue lifecycle. data: {action: observe|prepare|stop|renew, drawing?, session?}. Renew saves and renews the same document; others bypass IPC init.
       job           — Isolated AutoCAD LT job. launch: {action, drawing, ipc_dir, executable}; observe/attach/close: {action, path: absolute job.json}. No keyboard input; close saves first.

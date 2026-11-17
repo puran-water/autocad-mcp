@@ -1,4 +1,4 @@
-"""File IPC v2 loss, race, late-result and isolation tests, without AutoCAD."""
+"""File IPC v3 loss, race, late-result and isolation tests, without AutoCAD."""
 
 import asyncio
 import time
@@ -8,7 +8,7 @@ import pytest
 import autocad_mcp.backends.file_ipc as file_ipc
 from autocad_mcp.backends.file_ipc import FileIPCBackend
 from autocad_mcp.desktop import acknowledge, inspect_pending
-from autocad_mcp.ipc_protocol import cancel_unclaimed, paths, publish, read_json
+from autocad_mcp.ipc_protocol import cancel_unclaimed, move_unclaimed, paths, publish, read_json
 
 
 @pytest.fixture
@@ -23,9 +23,7 @@ def backend(tmp_path, monkeypatch):
 
 def claim(directory, rid, answer=True):
     files = paths(directory, rid)
-    try:
-        files["ready"].rename(files["claimed"])
-    except FileNotFoundError:
+    if not move_unclaimed(directory, rid, "claimed"):
         return False
     if answer:
         publish(files["result"], {"request_id": rid, "ok": True, "payload": "pong"})
@@ -134,7 +132,7 @@ async def test_result_without_claim_is_rejected(backend, monkeypatch):
 
 
 async def test_cancel_claim_race_has_one_winner(tmp_path):
-    # Two competing native filesystem renames, repeated with both arrival orders.
+    # Two competing exclusive decisions, repeated with both arrival orders.
     for i in range(80):
         rid = f"{i:012x}"
         publish(paths(tmp_path, rid)["ready"], {"request_id": rid})
@@ -145,6 +143,43 @@ async def test_cancel_claim_race_has_one_winner(tmp_path):
         assert sum(results) == 1
         files = paths(tmp_path, rid)
         assert files["claimed"].exists() != files["cancelled"].exists()
+        assert files["decision"].is_dir()
+
+
+def test_failed_move_keeps_fence_and_never_proves_cancellation(tmp_path, monkeypatch):
+    from pathlib import Path
+    from autocad_mcp.ipc_protocol import PROTOCOL, cancellation_proof
+
+    rid = "0123456789ab"
+    pending = {"protocol": PROTOCOL, "request_id": rid}
+    files = paths(tmp_path, rid)
+    publish(files["ready"], pending)
+
+    def fail_move(*args):
+        raise OSError("simulated failure after exclusive mkdir")
+
+    monkeypatch.setattr(Path, "rename", fail_move)
+    assert not cancel_unclaimed(tmp_path, rid)
+    assert files["decision"].is_dir() and files["ready"].exists()
+    assert not move_unclaimed(tmp_path, rid, "claimed")
+    assert not cancellation_proof(tmp_path, pending)
+
+
+def test_cancelled_envelope_without_fence_is_not_proof(tmp_path):
+    from autocad_mcp.ipc_protocol import PROTOCOL, cancellation_proof
+
+    pending = {"protocol": PROTOCOL, "request_id": "0123456789ab"}
+    publish(paths(tmp_path, pending["request_id"])["cancelled"], pending)
+    assert not cancellation_proof(tmp_path, pending)
+
+
+def test_old_namespace_is_not_consumed(tmp_path):
+    rid = "0123456789ab"
+    old = tmp_path / f"pcad-v2-{rid}.ready.json"
+    publish(old, {"protocol": 2, "request_id": rid})
+    assert not cancel_unclaimed(tmp_path, rid)
+    assert not move_unclaimed(tmp_path, rid, "claimed")
+    assert old.exists()
 
 
 async def test_cancellation_proof_rejects_altered_envelope(backend):
@@ -163,8 +198,8 @@ def test_trigger_loads_per_document_before_specific_dispatch(backend, monkeypatc
     # Restore actual trigger while keeping Win32 absent.
     monkeypatch.setattr(backend, "_post_text", posted.append)
     FileIPCBackend._type_dispatch_trigger(backend, "123456789abc")
-    assert len(posted) == 1 and "*mcp-ipc-protocol* 2" in posted[0]
-    assert '(mcp-dispatch-v2 "123456789abc")' in posted[0]
+    assert len(posted) == 1 and "*mcp-ipc-protocol* 3" in posted[0]
+    assert '(mcp-dispatch-v3 "123456789abc")' in posted[0]
     assert "(c:mcp-dispatch)" not in posted[0]
 
 
@@ -198,4 +233,4 @@ def test_disabled_autoload_stays_disabled(backend, monkeypatch):
     posted = []
     monkeypatch.setattr(backend, '_post_text', posted.append)
     FileIPCBackend._type_dispatch_trigger(backend, '123456789abc')
-    assert posted == ['(mcp-dispatch-v2 "123456789abc")']
+    assert posted == ['(mcp-dispatch-v3 "123456789abc")']
