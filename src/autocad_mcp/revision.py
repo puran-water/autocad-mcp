@@ -287,6 +287,8 @@ def compile_call(operation, data, *, lisp_path=None):
         if len({p[0].upper() for p in pairs}) != len(pairs) or len({p[1].upper() for p in pairs}) != len(pairs):
             raise RevisionError("DUPLICATE_LAYER_NAME")
         args, fn = [drawing, pairs, data["journal"]], "pcad:rename-layers"
+    elif operation == "preflight":
+        args, fn = [drawing], "pcad:resource-preflight"
     elif operation == "frames":
         args, fn = [drawing], "pcad:frames"
     elif operation == "read":
@@ -341,7 +343,7 @@ async def execute(backend, operation, data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=["compile", "batch", "read", "export_page", "plot", "save", "checkpoint", "frames"]
+        "operation", choices=["compile", "batch", "read", "export_page", "plot", "save", "checkpoint", "frames", "preflight"]
     )
     parser.add_argument("request", type=Path)
     parser.add_argument("--output", type=Path)

@@ -1,9 +1,9 @@
-;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2 / IPC v2
+;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2 / IPC v3
 ;;;
 ;;; Protocol:
-;;;   1. Python publishes pcad-v2-{id}.ready.json and a pending intent.
-;;;   2. Python invokes mcp-dispatch-v2 with that exact request ID.
-;;;   3. Rename ready to claimed BEFORE reading; cancellation wins otherwise.
+;;;   1. Python publishes pcad-v3-{id}.ready.json and a pending intent.
+;;;   2. Python invokes mcp-dispatch-v3 with that exact request ID.
+;;;   3. Exclusively create the decision directory, then move READY -> CLAIMED.
 ;;;   4. Python reads the matching atomic result; all evidence is retained.
 ;;; Legacy c:mcp-dispatch remains for older clients in its separate namespace.
 ;;;
@@ -522,13 +522,15 @@
   (if (not color) (setq color "white"))
   (if (not linetype) (setq linetype "CONTINUOUS"))
   (setq existed (tblsearch "LAYER" name))
-  (if existed
-    (mcp-layer-apply name color linetype nil)   ; update instead of silently ignoring
-    (ensure_layer_exists name color linetype))
+  ;; Creating an existing layer is a no-op, just like the ezdxf backend.
+  ;; Defaults (or explicit create arguments) must not restyle existing geometry.
+  ;; Deliberate changes belong to layer.set_properties.
+  (if (not existed) (ensure_layer_exists name color linetype))
   (setq d (tblsearch "LAYER" name))
   (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"color\":" (itoa (abs (cdr (assoc 62 d))))
                   ",\"linetype\":\"" (mcp-escape-string (cdr (assoc 6 d))) "\",\"created\":"
-                  (if existed "false" "true") "}"))
+                  (if existed "false" "true") ",\"existed\":"
+                  (if existed "true" "false") "}"))
 )
 
 (defun mcp-cmd-layer-set-current (params / name)
@@ -1358,24 +1360,32 @@
 ;; Main dispatcher — called by "(c:mcp-dispatch)" from Python
 ;; -----------------------------------------------------------------------
 
-;; Protocol 2 has a separate namespace. A legacy delayed trigger cannot consume
-;; these requests. Rename BEFORE read: only the winner of claim/cancel may run.
-(defun mcp-dispatch-v2 (request-id / prefix ready claimed result-file json-text
+;; Protocol 3 uses an exclusive mkdir fence before either side can move READY.
+;; Windows can report success for two competing renames of the same source.
+;; Keep the decision directory forever, even if the winning process crashes.
+(defun mcp-claim-request (prefix / ready claimed cancelled result-file decision)
+  (setq ready (strcat prefix ".ready.json") claimed (strcat prefix ".claimed.json")
+        cancelled (strcat prefix ".cancelled.json") result-file (strcat prefix ".result.json")
+        decision (strcat prefix ".decision"))
+  (and (findfile ready) (vl-mkdir decision)
+       (not (findfile claimed)) (not (findfile cancelled)) (not (findfile result-file))
+       (vl-file-rename ready claimed)))
+(defun mcp-dispatch-v3 (request-id / prefix ready claimed result-file json-text
                                   cmd-name result old-osmode old-cmdecho)
   (if (and (= (type request-id) 'STR) (= (strlen request-id) 12)
            (= "" (vl-string-trim "0123456789abcdef" request-id)))
     (progn
-      (setq prefix (strcat *mcp-ipc-dir* "pcad-v2-" request-id)
+      (setq prefix (strcat *mcp-ipc-dir* "pcad-v3-" request-id)
             ready (strcat prefix ".ready.json")
             claimed (strcat prefix ".claimed.json")
             result-file (strcat prefix ".result.json"))
-      (if (vl-file-rename ready claimed)
+      (if (mcp-claim-request prefix)
         (progn
           (setq json-text (mcp-read-file-lines claimed))
           (cond
             ((or (not json-text)
                  (not (and (numberp (mcp-json-get-number json-text "protocol"))
-                           (= (mcp-json-get-number json-text "protocol") 2)))
+                           (= (mcp-json-get-number json-text "protocol") 3)))
                  (not (equal (mcp-json-get-string json-text "request_id") request-id)))
              (setq result (cons nil "IPC_INVALID_ENVELOPE")))
             ((/= 0 (logand 1 (getvar "CMDACTIVE")))
@@ -1646,7 +1656,7 @@
 ;; Startup message
 ;; -----------------------------------------------------------------------
 
-(setq *mcp-ipc-protocol* 2)
+(setq *mcp-ipc-protocol* 3)
 (princ (strcat "\n=== MCP Dispatch v" *mcp-version* " loaded ==="))
 (princ "\nIPC directory: ")
 (princ *mcp-ipc-dir*)

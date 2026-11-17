@@ -53,8 +53,8 @@ async def test_timeout_blocks_next_dispatch_until_matching_receipt(tmp_path, mon
 
     def claim(rid):
         sent.append(1)
-        for f in tmp_path.glob("pcad-v2-*.ready.json"):
-            f.rename(tmp_path / f"pcad-v2-{rid}.claimed.json")
+        for f in tmp_path.glob("pcad-v3-*.ready.json"):
+            f.rename(tmp_path / f"pcad-v3-{rid}.claimed.json")
 
     monkeypatch.setattr(backend, "_type_dispatch_trigger", claim)
     first = await backend._dispatch("execute-lisp", {}, timeout=0.01)
@@ -66,7 +66,7 @@ async def test_timeout_blocks_next_dispatch_until_matching_receipt(tmp_path, mon
     assert second.error == "IPC_UNCERTAIN_RECONCILE_REQUIRED" and sent == [1]
     with pytest.raises(ValueError):
         acknowledge(tmp_path, pending["request_id"])
-    receipt = tmp_path / f"pcad-v2-{pending['request_id']}.result.json"
+    receipt = tmp_path / f"pcad-v3-{pending['request_id']}.result.json"
     receipt.write_text(
         json.dumps({"request_id": pending["request_id"], "ok": True, "payload": "done"})
     )

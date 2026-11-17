@@ -119,9 +119,9 @@ async def test_worker_dispatch_has_no_keyboard_path_and_retains_claim_proof(live
     monkeypatch.setattr(b, "_post_text", forbidden)
 
     async def native():
-        while not list(root.glob("pcad-v2-*.ready.json")):
+        while not list(root.glob("pcad-v3-*.ready.json")):
             await asyncio.sleep(0.001)
-        ready = next(root.glob("pcad-v2-*.ready.json"))
+        ready = next(root.glob("pcad-v3-*.ready.json"))
         data = read_json(ready)
         assert data["worker_session"] == manifest["session"]
         assert data["expected_drawing"] == manifest["drawing"]

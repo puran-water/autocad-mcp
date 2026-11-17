@@ -27,10 +27,10 @@ async def test_result_with_raw_newline_is_parsed(tmp_path: Path):
     backend._ipc_dir = tmp_path
 
     def trigger(rid):
-        cmd = json.loads(next(tmp_path.glob("pcad-v2-*.ready.json")).read_text(encoding="utf-8"))
+        cmd = json.loads(next(tmp_path.glob("pcad-v3-*.ready.json")).read_text(encoding="utf-8"))
         rid = cmd["request_id"]
-        next(tmp_path.glob("pcad-v2-*.ready.json")).rename(tmp_path / f"pcad-v2-{rid}.claimed.json")
-        (tmp_path / f"pcad-v2-{rid}.result.json").write_text(
+        next(tmp_path.glob("pcad-v3-*.ready.json")).rename(tmp_path / f"pcad-v3-{rid}.claimed.json")
+        (tmp_path / f"pcad-v3-{rid}.result.json").write_text(
             '{"request_id":"%s","ok":false,"error":"line one\nline two"}' % rid, encoding="utf-8"
         )
 
